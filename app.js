@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=12";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=12";
-import * as ui from "./ui.js?v=12";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=13";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=13";
+import * as ui from "./ui.js?v=13";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -134,7 +134,12 @@ async function render() {
     return;
   }
   await loadLocal();
-  $("fresh").textContent = `PC copy from ${ago(payload.made)}` + (Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "");
+  const ph = payload.phone || {}, old = (ph.data || 0) < 3;      // 3 = phone_data.DATA_VERSION this page needs
+  const fresh = $("fresh");
+  fresh.textContent = `${ph.source === "demo" ? "Demo copy" : ph.source === "real" ? "Your data" : "PC copy"} from ${ago(payload.made)}` +
+    (old ? " · old PC version — restart the PC app" : Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "");
+  fresh.style.color = old ? "var(--warn)" : "";
+  fresh.style.fontWeight = old ? "700" : "";
   show("app");
   ui.mount(payload.phone, ctx);
 }

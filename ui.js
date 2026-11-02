@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=12";
+import * as calc from "./calc.js?v=13";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -96,8 +96,8 @@ function go(id) {
 const NEEDS_DATA = 3;
 function oldCopyNote(v) {
   if ((D.data || 0) >= NEEDS_DATA) return;
-  v.append(h("div", { class: "card answer small" }, h("b", {}, "The PC copy is from an older version of the PC app. "),
-    "Close the finance app on the PC (and the demo) and open it again, then Settings → Phone → Write it now. Until then some details here stay empty."));
+  v.append(h("div", { class: "card", style: "background:var(--warn-soft);color:var(--ink)" }, h("div", { style: "font-weight:800;color:var(--warn)" }, "This copy is from an older PC app"),
+    h("div", { class: "small", style: "margin-top:4px" }, "Expanding parts and horizons, fixing transactions and holdings, and saying what a file is need a copy from the updated PC app. On the PC: close every finance app window (the app and the demo), open the one you want, then Settings → Phone → Write it now. Then reopen this app.")));
 }
 function renderAll() { renderToday(); renderBudget(); renderMoney(); renderTodo(); renderReview(); }
 
@@ -688,6 +688,7 @@ function renderReview() {
 // ================================================================ MONEY
 function renderMoney() {
   const v = $("#v-money"); v.innerHTML = "";
+  oldCopyNote(v);
   const M = D.money;
   if (!M) { v.append(h("div", { class: "card muted" }, "No holdings imported yet.")); return; }
   const nw = M.networth;
@@ -1105,6 +1106,7 @@ function mixCard(mx) {
 function strategySheet() {
   const st = D.decide.strategy || {}, M = D.money || {};
   sheet("Is the strategy working?", body => {
+    oldCopyNote(body);
     if (st.mix && st.mix.drift != null) body.append(mixCard(st.mix));
     const hz = (st.mix || {}).horizons || [];
     const sl = hz.length ? [] : (st.sleeves || []);
