@@ -175,3 +175,4 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 32px; }
 .chips.one-line { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-right: -16px; padding-right: 16px; }
 .chips.one-line::-webkit-scrollbar { display: none; }
 .chips.one-line .chip { flex: none; }
+.nw { white-space: nowrap; }

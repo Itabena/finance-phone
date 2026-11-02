@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=7";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=7";
-import * as ui from "./ui.js?v=7";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=9";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=9";
+import * as ui from "./ui.js?v=9";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -29,7 +29,7 @@ let modified = null;      // when Drive got it
 let payload = null;       // decrypted, in memory only
 let token = null, tokenClient = null;
 let liveKey = null;       // the unlocked key, in memory only (also in IndexedDB when "remember" is ticked)
-let local = { ticks: {}, answers: {} };   // done on the phone, not yet in a newer PC copy
+let local = { ticks: {}, answers: {}, sent: [] };   // done on the phone, not yet in a newer PC copy
 let pending = 0;
 
 const GATES = ["screen-start", "screen-unlock", "screen-msg"];
@@ -121,7 +121,8 @@ $("unlock-form").addEventListener("submit", async e => {
 
 // ---------------------------------------------------------------- showing the app
 async function loadLocal() {
-  local = (await idb.get("local").catch(() => null)) || { ticks: {}, answers: {} };
+  local = (await idb.get("local").catch(() => null)) || { ticks: {}, answers: {}, sent: [] };
+  local.sent = (local.sent || []).filter(f => new Date(f.at).getTime() >= (new Date(payload.made).getTime() || 0) - 60e3);
   const made = new Date(payload.made).getTime() || 0;          // a newer PC copy already contains these
   for (const k of ["ticks", "answers"]) for (const [x, at] of Object.entries(local[k] || {})) if (new Date(at).getTime() < made - 60e3) delete local[k][x];
   await idb.set("local", local).catch(() => {});
@@ -141,6 +142,8 @@ const ctx = {
   isTicked: key => !!local.ticks[key],
   isAnswered: desc => !!local.answers[desc],
   pendingCount: () => pending,
+  sentFiles: () => local.sent || [],
+  async send(path, fields) { await queueAdd({ path, fields }); },
   toast,
   async tick(key) {
     local.ticks[key] = new Date().toISOString(); await idb.set("local", local).catch(() => {});
@@ -207,6 +210,8 @@ async function uploadFile(f) {
   const b64 = await new Promise((res, rej) => { const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
   await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64 }, sealParams("upload")));
+  local.sent = [...(local.sent || []), { name: f.name, at: new Date().toISOString() }];
+  await idb.set("local", local).catch(() => {});
 }
 
 // ---------------------------------------------------------------- buttons
