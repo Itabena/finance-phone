@@ -12,9 +12,21 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=7">
 <script src="https://accounts.google.com/gsi/client" async></script>
-<script type="module" src="app.js"></script>
+<script>
+  // If the app script cannot start (an old cached file, no connection), say so instead of showing a blank page.
+  window.addEventListener("error", function (e) { window.__bootError = (e.message || "") + (e.filename ? " · " + e.filename.split("/").pop() : ""); });
+  setTimeout(function () {
+    if (window.__appStarted) return;
+    document.getElementById("msg").textContent = "The app did not start" + (window.__bootError ? " (" + window.__bootError + ")" : "") +
+      ". A new version may still be on its way: tap Reload, or close the app fully and open it again.";
+    var r = document.getElementById("retry"); r.textContent = "Reload"; r.onclick = function () { location.reload(); };
+    document.getElementById("resignin").hidden = true;
+    document.getElementById("screen-msg").hidden = false;
+  }, 6000);
+</script>
+<script type="module" src="app.js?v=7"></script>
 </head>
 <body>
 <header class="top">

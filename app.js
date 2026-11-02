@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js";
-import * as ui from "./ui.js";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=7";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=7";
+import * as ui from "./ui.js?v=7";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -241,6 +241,7 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
 
 // ---------------------------------------------------------------- start
 (async () => {
+  window.__appStarted = true;
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   if (CLIENT_ID.startsWith("PASTE")) { message("This page is not set up yet: the Google client ID is missing in config.js."); return; }
   const saved = await idb.get("snapshot").catch(() => null);
