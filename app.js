@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=11";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=11";
-import * as ui from "./ui.js?v=11";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=12";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=12";
+import * as ui from "./ui.js?v=12";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -204,13 +204,13 @@ async function flush() {
   await idb.set("queue", left);
   pending = left.length; ui.refreshBadges();
 }
-async function uploadFile(f) {
+async function uploadFile(f, what) {
   if (f.size > 15 * 1024 * 1024) throw new Error("that file is over 15 MB");
   if (!token) await getToken(false);
   const b64 = await new Promise((res, rej) => { const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
-  await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64 }, sealParams("upload")));
-  local.sent = [...(local.sent || []), { name: f.name, at: new Date().toISOString() }];
+  await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64, what: what || "" }, sealParams("upload")));
+  local.sent = [...(local.sent || []), { name: f.name, what: what || "", at: new Date().toISOString() }];
   await idb.set("local", local).catch(() => {});
 }
 

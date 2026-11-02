@@ -1,6 +1,6 @@
 // Keeps the phone page itself available offline (the encrypted copy lives in IndexedDB). Network first, so a new
 // version of the page arrives as soon as there is a connection.
-const V = "finance-phone-v11";
+const V = "finance-phone-v12";
 const SHELL = ["./", "index.html", "app.js", "ui.js", "calc.js", "crypto.js", "config.js", "app.css", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", e => {
