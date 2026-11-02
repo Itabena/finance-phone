@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=13";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=13";
-import * as ui from "./ui.js?v=13";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=15";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=15";
+import * as ui from "./ui.js?v=15";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -51,11 +51,16 @@ function ago(iso) {
 }
 
 // ---------------------------------------------------------------- Google sign-in + Drive
+let tokenWait = null;      // the sign-in in progress, so two taps never start two Google windows
 function getToken(interactive) {
-  return new Promise((resolve, reject) => {
+  if (tokenWait) return tokenWait;
+  tokenWait = new Promise((resolve, reject) => {
     if (!(window.google && google.accounts && google.accounts.oauth2)) return reject(new Error("Google sign-in did not load — check the connection."));
+    const slow = interactive ? null : setTimeout(() => reject(new Error("Google sign-in did not answer")), 30000);
+    const done = () => clearTimeout(slow);
     if (!tokenClient) tokenClient = google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPES, callback: () => {} });
     tokenClient.callback = r => {
+      done();
       if (r.error) return reject(new Error(r.error_description || r.error));
       // Google shows a tick box per permission; without "see your Drive files" the copy is invisible to this page.
       if (!google.accounts.oauth2.hasGrantedAllScopes(r, "https://www.googleapis.com/auth/drive.readonly")) {
@@ -64,10 +69,15 @@ function getToken(interactive) {
       }
       token = r.access_token; resolve(token);
     };
-    tokenClient.error_callback = e => reject(new Error(e.message || e.type || "sign-in was cancelled"));
+    tokenClient.error_callback = e => { done(); reject(new Error(e.message || e.type || "sign-in was cancelled")); };
     tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
-  });
+  }).finally(() => { tokenWait = null; });
+  return tokenWait;
 }
+// The app opens from the copy saved on the phone, without a Google sign-in. Asking Google again with no prompt brings
+// a token back without a question when this account already allowed the page (a Google window may flash). It must
+// start inside the tap — phones block sign-in windows opened later — so callers call this before their first await.
+function quietToken() { return token ? Promise.resolve(token) : getToken(false).catch(() => null); }
 async function drive(url, opts = {}) {
   const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
   if (r.status === 401) { token = null; throw new Error("Google sign-in expired — tap Get latest again."); }
@@ -162,18 +172,30 @@ const ctx = {
     toast("Filed.", { label: "Undo", run: () => { undone = true; clearTimeout(timer); delete local.answers[desc]; rerender(); } });
   },
   upload: uploadFile,
+  // PLAN-48: entries made here wait on the phone until they reach Drive; this sends them now.
+  async flushNow() {
+    try { if (!token) await getToken(false); await flush(); pending = ((await idb.get("queue")) || []).length; ui.refreshBadges();
+      toast(pending ? `${pending} still waiting — try again with a connection.` : "Sent — the PC applies it within a minute while it runs."); }
+    catch (e) { toast("Not sent yet: " + e.message); }
+  },
 };
 
 // ---------------------------------------------------------------- the phone's queue (C2) and uploads (C3)
 // Each change goes to Drive as one encrypted file in a folder this page creates itself ("Finance-phone-queue");
 // the PC applies it with finance/sync/phone_queue.py and then republishes the snapshot.
 async function queueAdd(q, quiet) {
+  // quiet = a review answer sent 5 s after the tap: too late to open a sign-in window, so it only goes if signed in.
+  const signing = quiet ? null : quietToken();      // before the first await: still inside the tap
   const items = (await idb.get("queue")) || [];
   items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), fields: q.fields || [] });
   await idb.set("queue", items);
   pending = items.length; ui.refreshBadges();
-  try { await flush(); if (!quiet) toast("Saved — the PC applies it within a minute while it runs."); }
-  catch (e) { toast("Saved on the phone — it goes to the PC with the next Get latest."); }
+  if (signing) await signing;
+  try { await flush(); if (!quiet) toast("Sent — the PC applies it within a minute while it runs."); }
+  catch (e) {
+    pending = ((await idb.get("queue").catch(() => null)) || []).length; ui.refreshBadges();
+    toast(`Saved on this phone — ${pending} change(s) waiting to send.`, { label: "Send now", run: () => ctx.flushNow() });
+  }
 }
 async function queueFolder() {
   const known = await idb.get("queue-folder");

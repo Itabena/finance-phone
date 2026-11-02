@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=13";
+import * as calc from "./calc.js?v=15";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -216,7 +216,11 @@ function sendForm(key, path, fieldsFn, button = "Save") {
     const fields = fieldsFn(msg);
     if (!fields) return;
     btn.disabled = true;
-    try { await C.send(path, fields); sentHere.add(key); msg.innerHTML = '<span class="sent-ok">Saved here — the PC applies it the next time it runs.</span>'; btn.textContent = "Sent ✓ — send again"; }
+    try { await C.send(path, fields); sentHere.add(key);
+      const w = C.pendingCount ? C.pendingCount() : 0;
+      msg.innerHTML = w ? '<span class="sent-ok">Saved on this phone — it goes to the PC when there is a connection (To do → Today shows it).</span>'
+        : '<span class="sent-ok">Sent — the PC applies it within a minute while it runs, then writes a new copy.</span>';
+      btn.textContent = "Sent ✓ — send again"; }
     catch (err) { msg.textContent = "Could not save: " + err.message; }
     btn.disabled = false;
   });
@@ -898,6 +902,8 @@ function todoModel() {
   const out = { today: [], month: [], quarter: [], year: [] };
   const keys = new Set((F.todo || []).map(t => t.key)), byKey = Object.fromEntries((F.todo || []).map(t => [t.key, t]));
   const fill = (period, key, open, title) => { const t = byKey[key]; if (t) out[period].push({ type: "fill", title: title || t.title, sub: [t.minutes ? `~${t.minutes} min` : null, t.unlocks ? `unlocks ${t.unlocks}` : null].filter(Boolean).join(" · "), open }); };
+  const waiting = C.pendingCount ? C.pendingCount() : 0;
+  if (waiting) out.today.push({ type: "fill", title: `${waiting} change(s) still on this phone`, sub: "not sent to Drive yet — tap to send now", open: () => C.flushNow && C.flushNow() });
   const q = ((D.review || {}).queue || []).filter(g => !C.isAnswered(g.description));
   if (q.length) out.today.push({ type: "fill", title: `Answer ${q.length} uncertain transaction(s)`, sub: "Review tab", open: () => go("review") });
   const la = F.last_applied;
