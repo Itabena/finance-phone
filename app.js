@@ -1,12 +1,13 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=15";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=15";
-import * as ui from "./ui.js?v=15";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=16";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=16";
+import * as ui from "./ui.js?v=16";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
 const $ = id => document.getElementById(id);
+const APP_VERSION = 16;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
@@ -267,14 +268,21 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
     btn("Sign in again", "Switch Google account or grant Drive permission again", () => { token = null; fetchLatest(true); }),
     btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
   const p = document.createElement("p"); p.className = "small muted";
-  p.textContent = "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
+  p.textContent = `Phone app v${APP_VERSION}. ` + "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
   body.append(p);
 });
 
 // ---------------------------------------------------------------- start
 (async () => {
   window.__appStarted = true;
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) {
+    // A new version takes over while this page still runs the old code: offer a reload instead of mixing the two.
+    const hadOne = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadOne) toast("A new version of this app is here.", { label: "Reload", run: () => location.reload() });
+    });
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
   if (CLIENT_ID.startsWith("PASTE")) { message("This page is not set up yet: the Google client ID is missing in config.js."); return; }
   const saved = await idb.get("snapshot").catch(() => null);
   if (saved && saved.blob) { blob = saved.blob; modified = saved.modified; await open(); }   // works offline
