@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=9";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=9";
-import * as ui from "./ui.js?v=9";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=11";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=11";
+import * as ui from "./ui.js?v=11";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";

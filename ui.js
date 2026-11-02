@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=9";
+import * as calc from "./calc.js?v=11";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -149,9 +149,9 @@ function renderToday() {
       h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Update the data"),
         h("div", { class: "small muted" }, sent.length ? `${sent.length} file(s) sent, waiting for the PC` : "Send a bank, card or fund file from this phone")),
       h("span", { class: "muted" }, "›")),
-    todo.length ? h("button", { class: "row", style: "width:100%;border:0;border-top:1px solid var(--line);background:none;text-align:left;padding:4px 0", onclick: pcSheet },
-      h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Waiting for the PC"),
-        h("div", { class: "small muted" }, `${todo.length} thing(s), about ${todo.reduce((s, t) => s + (t.minutes || 0), 0)} min`)),
+    todo.length ? h("button", { class: "row", style: "width:100%;border:0;border-top:1px solid var(--line);background:none;text-align:left;padding:4px 0", onclick: D.fill ? fillSheet : pcSheet },
+      h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, D.fill ? "Fill in what's missing" : "Waiting for the PC"),
+        h("div", { class: "small muted" }, `${todo.length} thing(s), about ${todo.reduce((s, t) => s + (t.minutes || 0), 0)} min` + (D.fill ? " · most can be done here" : ""))),
       h("span", { class: "muted" }, "›")) : null));
 }
 function thisMonth() { return (D.today || "").slice(0, 7); }
@@ -192,6 +192,165 @@ function pcSheet() {
     body.append(h("div", { class: "card list", style: "padding:4px 14px" }, (D.pc_todo || []).map(t =>
       h("div", { class: "row" }, h("div", { class: "grow" }, h("div", {}, t.title),
         h("div", { class: "small muted" }, [t.minutes ? `~${t.minutes} min` : null, t.unlocks ? `unlocks ${t.unlocks}` : null].filter(Boolean).join(" · ")))))));
+  });
+}
+
+// ================================================================ FILL IN WHAT IS MISSING (PLAN-47)
+// The phone never changes numbers itself: each answer goes into the queue and the PC applies it through the same
+// form the PC uses (same checks). Files are read only on the PC.
+const sentHere = new Set();
+const today = () => (D.today || new Date().toISOString().slice(0, 10));
+function input(type, attrs = {}) { return h("input", Object.assign({ type, inputmode: type === "number" ? "decimal" : null }, attrs)); }
+function fieldOf(label, el) { return h("div", { class: "field" }, h("label", {}, label), el); }
+function sendForm(key, path, fieldsFn, button = "Save") {
+  const msg = h("div", { class: "small" });
+  const btn = h("button", { class: "primary" }, sentHere.has(key) ? "Sent ✓ — send again" : button);
+  btn.addEventListener("click", async e => {
+    e.preventDefault();
+    const fields = fieldsFn(msg);
+    if (!fields) return;
+    btn.disabled = true;
+    try { await C.send(path, fields); sentHere.add(key); msg.innerHTML = '<span class="sent-ok">Saved here — the PC applies it the next time it runs.</span>'; btn.textContent = "Sent ✓ — send again"; }
+    catch (err) { msg.textContent = "Could not save: " + err.message; }
+    btn.disabled = false;
+  });
+  return [btn, msg];
+}
+function getLinks(groups) {
+  const S = ((D.fill || {}).sources || []).filter(x => !groups || groups.includes(x.group));
+  if (!S.length) return h("div", { class: "small muted" }, "Choose your providers on the PC (Settings → Your providers) to get links here.");
+  return h("div", { class: "list" }, S.map(x => h("div", { class: "row", style: "min-height:auto;padding:6px 0;align-items:flex-start" },
+    h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, bdi(x.name)), h("div", { class: "small muted" }, x.what)),
+    h("span", { class: "links" }, x.gmail ? h("a", { class: "chip", href: x.gmail, target: "_blank", rel: "noopener" }, "Gmail") : null,
+      h("a", { class: "chip", href: x.url, target: "_blank", rel: "noopener" }, "Site")))));
+}
+function fillSheet() {
+  const F = D.fill || {}, T = F.todo || [];
+  sheet("Fill in what's missing", body => {
+    const la = F.last_applied;
+    if (la && la.refused) body.append(h("div", { class: "card answer small" }, `Last time the PC could not apply ${la.refused} thing(s)` + (la.why ? ": " + la.why.join("; ") : ".")));
+    const card = h("div", { class: "card list", style: "padding:2px 14px" });
+    const row = (title, sub, fn) => card.append(h("button", { class: "row", style: "width:100%;border:0;background:none;text-align:left;padding:8px 0", onclick: fn },
+      h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, title), sub ? h("div", { class: "small muted" }, sub) : null), h("span", { class: "muted" }, fn ? "›" : "")));
+    for (const t of T) {
+      const sub = [t.minutes ? `~${t.minutes} min` : null, t.unlocks ? `unlocks ${t.unlocks}` : null].filter(Boolean).join(" · ");
+      if (t.key === "exports") row(t.title, sub, () => filesSheet(F.files.missing_groups, "Last month's files"));
+      else if (t.key === "quarterly" || t.key === "holdings") row(t.title, sub, () => filesSheet(["broker", "funds"], "Fund and broker statements", true));
+      else if (t.key === "cash") row(t.title, sub, cashSheet);
+      else if (t.key === "commitment") row(t.title, sub, commitmentSheet);
+      else if (t.key === "classify") row(t.title, sub, classifySheet);
+      else if (t.key === "pots") row(t.title, sub, potsSheet);
+      else if (t.key === "positions") row(t.title, sub, confirmSheet);
+      else if (t.key === "review") row(t.title, sub, () => { closeAllSheets(); go("review"); });
+      else if (t.key === "import") row(t.title, "The PC imports them when it next runs.", null);
+      else row(t.title, (sub ? sub + " · " : "") + "on the PC", null);
+    }
+    if ((F.tags || []).length) row(`Check ${F.tags.length} guessed tag(s)`, "asset, market and kind — they decide which part of your mix each holding counts in", tagsSheet);
+    body.append(card);
+    body.append(h("div", { class: "card list", style: "padding:2px 14px" },
+      h("button", { class: "row", style: "width:100%;border:0;background:none;text-align:left;padding:8px 0", onclick: sendSheet },
+        h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Send any file"), h("div", { class: "small muted" }, "bank, card or fund file — the PC reads it")), h("span", { class: "muted" }, "›")),
+      h("button", { class: "row", style: "width:100%;border:0;border-top:1px solid var(--line);background:none;text-align:left;padding:8px 0", onclick: () => balanceSheet() },
+        h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Type a balance by hand"), h("div", { class: "small muted" }, "when you have the number but no file")), h("span", { class: "muted" }, "›"))));
+  });
+}
+function filesSheet(groups, title, funds) {
+  sheet(title, body => {
+    body.append(h("p", { class: "small muted", style: "margin:0" }, "Download the file from the provider (or find it in Gmail), then send it here. The PC reads it."));
+    body.append(h("div", { class: "card" }, getLinks(groups)));
+    body.append(h("button", { class: "primary", onclick: sendSheet }, "Send the file"));
+    body.append(h("div", { class: "card list", style: "padding:2px 14px" },
+      h("div", { class: "kicker", style: "padding-top:10px" }, "No file?"),
+      funds ? h("button", { class: "row", style: "width:100%;border:0;background:none;text-align:left;padding:8px 0", onclick: () => balanceSheet() },
+        h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Type the balances by hand"), h("div", { class: "small muted" }, "from the provider's site or app")), h("span", { class: "muted" }, "›"))
+        : h("button", { class: "row", style: "width:100%;border:0;background:none;text-align:left;padding:8px 0", onclick: cashSheet },
+        h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Type the bank balance"), h("div", { class: "small muted" }, "the spending itself still needs the file")), h("span", { class: "muted" }, "›"))));
+  });
+}
+function cashSheet() {
+  const c = (D.fill || {}).cash || {};
+  sheet("Bank balance", body => {
+    const v = input("number", { placeholder: "₪", value: "" }), d = input("date", { value: today() }), n = input("text", { placeholder: "e.g. Leumi app" });
+    body.append(h("p", { class: "small muted", style: "margin:0" }, c.value != null ? `Last: ${ils(c.value)} on ${c.as_of}.` : "Not entered yet."));
+    body.append(h("div", { class: "fill-form" }, fieldOf("Balance today (₪)", v), fieldOf("Date", d), fieldOf("Where you read it", n),
+      sendForm("cash", "/settings/cash", m => { if (!v.value || !n.value.trim()) { m.textContent = "The balance and where you read it are both needed."; return null; }
+        return [["value", v.value], ["as_of", d.value], ["note", n.value.trim()]]; })));
+  });
+}
+function commitmentSheet() {
+  const c = (D.fill || {}).commitment || {};
+  sheet("Monthly savings", body => {
+    const v = input("number", { placeholder: "₪ a month", value: c.value != null ? Math.round(c.value) : "" });
+    body.append(h("p", { class: "small muted", style: "margin:0" }, "What you commit to set aside each month (pay yourself first). Decide → Set aside shows what the budget allows."));
+    body.append(h("div", { class: "fill-form" }, fieldOf("Each month (₪)", v),
+      sendForm("commitment", "/settings/commitment", m => { if (!v.value) { m.textContent = "Type an amount."; return null; } return [["value", v.value]]; })));
+  });
+}
+function classifySheet() {
+  const L = (D.fill || {}).classify || [];
+  sheet("Classify holdings", body => {
+    body.append(h("p", { class: "small muted", style: "margin:0" }, "Horizon: when you may need the money — safe up to 3 years, mid 3–7, long 7+. Israel and equity shares are in the fund's factsheet."));
+    if (!L.length) body.append(h("div", { class: "card muted" }, "Everything is classified."));
+    for (const x of L) {
+      const sl = h("select", {}, [["", "Horizon…"], ["safe", "Safe (≤3 yrs)"], ["mid", "Mid (3–7 yrs)"], ["long", "Long (7+ yrs)"], ["retirement", "Retirement"]].map(([v, t]) => h("option", { value: v }, t)));
+      const il = input("number", { placeholder: "%", value: x.israel != null ? Math.round(x.israel * 100) : "" });
+      const eq = input("number", { placeholder: "%", value: x.equity != null ? Math.round(x.equity * 100) : "" });
+      body.append(h("div", { class: "card fill-form" }, h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow t", style: "font-weight:800" }, bdi(x.name)), h("span", { class: "num" }, ils(x.value))),
+        fieldOf("Horizon", sl), h("div", { class: "two" }, fieldOf("Israel %", il), fieldOf("Equity %", eq)),
+        sendForm("cls:" + x.instrument, "/hold/classify", m => { if (!sl.value) { m.textContent = "Choose a horizon."; return null; }
+          const f = [["instrument", x.instrument], ["sleeve", sl.value], ["israel", il.value], ["equity", eq.value], ["leverage", String(x.leverage || 1)]];
+          if (x.legacy) f.push(["legacy", "1"]); return f; })));
+    }
+  });
+}
+function potsSheet() {
+  const L = (D.fill || {}).pots || [], P = D.people || {};
+  sheet("Whose pension?", body => {
+    for (const x of L) {
+      const s = h("select", {}, h("option", { value: "pension_me" }, `${P.me || "Me"}`), h("option", { value: "pension_spouse" }, `${P.spouse || "Spouse"}`));
+      body.append(h("div", { class: "card fill-form" }, h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow t", style: "font-weight:800" }, bdi(x.name)), h("span", { class: "num" }, ils(x.value))),
+        fieldOf("Belongs to", s), sendForm("pot:" + x.account, "/hold/pot", () => [["account", x.account], ["pot", s.value]])));
+    }
+  });
+}
+function confirmSheet() {
+  const n = (D.fill || {}).confirm || 0;
+  sheet("Confirm imported holdings", body => {
+    body.append(h("p", { class: "small" }, `${n} holding(s) from the last statement are waiting. Confirm if the values look like what the provider shows (Money tab).`));
+    body.append(h("div", { class: "fill-form" }, sendForm("confirm", "/hold/confirm", () => [["from", "phone"]], "Confirm them")));
+  });
+}
+function tagsSheet() {
+  const F = D.fill || {}, L = F.tags || [], O = F.tag_options || {};
+  sheet("Guessed tags", body => {
+    body.append(h("p", { class: "small muted", style: "margin:0" }, "The app guessed these from the fund names. Keep a guess or pick the right value; they decide which part of your mix each holding counts in."));
+    for (const x of L) {
+      const sel = (field, opts) => h("select", {}, h("option", { value: "" }, `${x.guessed.includes(field) ? "guess" : "keep"}: ${opts[x[field]] || x[field]}`),
+        Object.entries(opts).map(([v, t]) => h("option", { value: v }, t)));
+      const a = sel("asset", O.asset || {}), r = sel("region", O.region || {}), k = sel("kind", O.kind || {});
+      body.append(h("div", { class: "card fill-form" }, h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow t", style: "font-weight:800" }, bdi(x.name)), h("span", { class: "num" }, ils(x.value))),
+        fieldOf("Asset", a), fieldOf("Market", r), fieldOf("Kind", k),
+        sendForm("tag:" + x.instrument, "/mix/tags", () => [["t0_key", x.instrument], ["t0_asset", a.value || (x.guessed.includes("asset") ? "" : x.asset)],
+          ["t0_region", r.value || (x.guessed.includes("region") ? "" : x.region)], ["t0_kind", k.value || (x.guessed.includes("kind") ? "" : x.kind)]])));
+    }
+  });
+}
+function balanceSheet() {
+  const B = (D.fill || {}).balances || [];
+  sheet("Type a balance by hand", body => {
+    body.append(h("p", { class: "small muted", style: "margin:0" }, "For when there is no file: the value the provider's site or app shows today. Holdings you leave as they are keep their last value."));
+    for (const b of B) body.append(expander([h("span", { class: "grow", style: "min-width:0" }, h("div", { class: "t", style: "font-weight:700" }, bdi(b.name)),
+        h("div", { class: "small muted" }, `last statement ${b.as_of || "—"}`))],
+      x => {
+        const rows = b.holdings.map(hd => ({ hd, el: input("number", { value: Math.round(hd.value) }) }));
+        const d = input("date", { value: today() }), n = input("text", { placeholder: "e.g. Meitav app" });
+        x.append(h("div", { class: "fill-form" }, rows.map(({ hd, el }) => fieldOf(hd.name, el)), fieldOf("Date", d), fieldOf("Where you read it", n),
+          sendForm("bal:" + b.account, "/hold/balance", m => {
+            if (!n.value.trim()) { m.textContent = "Say where you read it — it is kept with the number."; return null; }
+            const f = [["account", b.account], ["as_of", d.value], ["note", n.value.trim()]];
+            rows.forEach(({ hd, el }, i) => { f.push([`k${i}`, hd.instrument], [`v${i}`, el.value]); });
+            return f; })));
+      }));
   });
 }
 
@@ -469,7 +628,8 @@ function potSheet(p) {
       h("div", { class: "grow" }, h("div", { class: "t" }, bdi(x.name)),
         h("div", { class: "small muted t" }, [x.account, x.fee != null ? `fee ${(x.fee * 100).toFixed(2)}%` : null, x.legacy ? "legacy" : null].filter(Boolean).join(" · "))),
       h("span", { class: "num", style: "font-weight:700" }, ils(x.value))))));
-    body.append(h("p", { class: "small muted" }, "Classifying holdings and linking funds to the regulator is done on the PC."));
+    if (D.fill) body.append(h("button", { class: "ghost", onclick: () => balanceSheet() }, "Type a balance by hand"));
+    body.append(h("p", { class: "small muted" }, D.fill ? "Linking funds to the regulator is done on the PC." : "Classifying holdings and linking funds to the regulator is done on the PC."));
   });
 }
 function meter(m) {
@@ -479,7 +639,7 @@ function meter(m) {
     h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow small", style: "font-weight:700" }, m.label),
       h("span", { class: state }, `${pct(m.value)} · ${m.state === "inside" ? "in the zone" : m.state}`)),
     h("div", { class: "bar", style: "margin-top:8px;height:10px" },
-      h("i", { style: `left:${pos(m.lo)};width:calc(${pos(m.hi)} - ${pos(m.lo)});background:var(--accent-soft)` }),
+      h("i", { class: "band", style: `left:${pos(m.lo)};width:calc(${pos(m.hi)} - ${pos(m.lo)})` }),
       h("b", { style: `left:${pos(m.value)};width:4px;background:var(--ink);opacity:1;border-radius:2px` })),
     h("div", { class: "small muted", style: "margin-top:4px" }, `zone ${pct(m.lo)}–${pct(m.hi)}, aim ${pct(m.aim)} — ${m.of || ""}`));
 }
@@ -692,8 +852,30 @@ function driftSvg(hist, ok, W, H, axes) {
   const ax = axes ? [0, ok, top / 1.15].map(y => `<text x="${L - 5}" y="${(sy(y) + 4).toFixed(1)}" font-size="10" text-anchor="end" fill="var(--muted)">${Math.round(y * 100)}%</text>`).join("")
     + `<text x="${L}" y="${H - 4}" font-size="10" fill="var(--muted)">${pts[0].date.slice(0, 7)}</text><text x="${W - R}" y="${H - 4}" font-size="10" text-anchor="end" fill="var(--muted)">${pts[pts.length - 1].date.slice(0, 7)}</text>` : "";
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block" role="img" aria-label="How far from your plan at each statement, last ${Math.round(pts[pts.length - 1].drift * 100)}%">
-    <rect x="${L}" y="${sy(ok).toFixed(1)}" width="${W - L - R}" height="${(sy(0) - sy(ok)).toFixed(1)}" fill="var(--accent-soft)"/>
+    <rect x="${L}" y="${sy(ok).toFixed(1)}" width="${W - L - R}" height="${(sy(0) - sy(ok)).toFixed(1)}" fill="var(--band)" opacity=".55"/>
     <path d="${line}" fill="none" stroke="var(--warn)" stroke-width="2" vector-effect="non-scaling-stroke"/>${dots}${ax}</svg>`;
+}
+// A row that opens in place to show what is behind it (the body is built on first open).
+function expander(head, build) {
+  const body = h("div", { class: "xp-body", hidden: true });
+  const wrap = h("div", { class: "xp" });
+  let built = false;
+  const btn = h("button", { class: "xp-head", "aria-expanded": "false", onclick: () => {
+    const open = body.hidden;
+    if (open && !built) { build(body); built = true; }
+    body.hidden = !open; btn.setAttribute("aria-expanded", String(open));
+    if (open) wrap.setAttribute("data-open", ""); else wrap.removeAttribute("data-open");
+  } }, head, h("span", { class: "chev", "aria-hidden": "true" }, "›"));
+  wrap.append(btn, body);
+  return wrap;
+}
+const DIM_LABEL = { horizon: { safe: "Safe", mid: "Mid", long: "Long" },
+  asset: { stocks: "stocks", bonds: "bonds", cash: "cash", real_estate: "real estate", other: "other assets" },
+  market: { israel: "Israel", us: "US", dev_ex_us: "other developed", emerging: "emerging", other: "other markets" },
+  kind: { index: "index funds", active: "active funds", stock: "single stocks", track: "gemel / hishtalmut tracks", deposit: "deposits", other: "other kinds" } };
+function whereText(w) {
+  const parts = Object.entries(w || {}).filter(([, v]) => v && v.length).map(([d, v]) => v.map(x => (DIM_LABEL[d] || {})[x] || x).join(" or "));
+  return parts.length ? parts.join(" · ") : "everything not taken by the parts above";
 }
 function mixCard(mx) {
   const pos = v => `${Math.max(0, Math.min(100, v * 100)).toFixed(1)}%`;
@@ -702,22 +884,48 @@ function mixCard(mx) {
       h("span", { class: "small muted num" }, ils(mx.value))),
     h("div", { html: driftSvg(mx.hist, mx.drift_ok, 320, 120, true) }),
     h("p", { class: "small muted", style: "margin:0" }, `${pct(mx.drift, 1)} of the money would have to move to be exactly on target. Below the shaded strip (${pct(mx.drift_ok)}) is close enough; act on a part that leaves its band — new money first.`),
-    mx.rows.map(r => h("div", {},
-      h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow small", style: "font-weight:700" }, r.name),
-        h("span", { class: r.state === "inside" ? "pill" : "pill warn" }, `${pct(r.share)} · aim ${pct(r.target)}`)),
-      h("div", { class: "bar", style: "margin-top:6px;height:8px" },
-        h("i", { style: `left:${pos(r.lo)};width:calc(${pos(r.hi)} - ${pos(r.lo)});background:var(--accent-soft)` }),
-        h("b", { style: `left:${pos(r.share || 0)};width:4px;background:${r.state === "inside" ? "var(--ink)" : "var(--warn)"};opacity:1;border-radius:2px` })),
-      h("div", { class: "small muted", style: "margin-top:2px" }, `band ${pct(r.lo)}–${pct(r.hi)} · ` + (r.gap == null ? "" : r.gap >= 0 ? `buy ${ils(r.gap)}` : `${ils(-r.gap)} over`)))),
+    h("div", { class: "small muted" }, "Tap a part to see which holdings are in it and why."),
+    mx.rows.map(r => expander(
+      [h("span", { class: "grow", style: "min-width:0" },
+         h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "grow small", style: "font-weight:700" }, r.name),
+           h("span", { class: r.state === "inside" ? "pill" : "pill warn" }, `${pct(r.share)} · aim ${pct(r.target)}`)),
+         h("div", { class: "bar", style: "margin-top:6px;height:8px" },
+           h("i", { class: "band", style: `left:${pos(r.lo)};width:calc(${pos(r.hi)} - ${pos(r.lo)})` }),
+           h("i", { class: "aim", style: `left:${pos(r.target)}` }),
+           h("b", { style: `left:${pos(r.share || 0)};width:4px;background:${r.state === "inside" ? "var(--ink)" : "var(--warn)"};opacity:1;border-radius:2px` })),
+         h("div", { class: "small muted", style: "margin-top:2px" }, `band ${pct(r.lo)}–${pct(r.hi)} · ` + (r.gap == null ? "" : r.gap >= 0 ? `buy ${ils(r.gap)}` : `${ils(-r.gap)} over`)))],
+      body => {
+        body.append(h("div", { class: "small muted" }, r.id === "_rest" ? "Money no part takes — it counts as off plan. Add a part for it, or widen one, on the PC (Your mix)." : `Counts: ${whereText(r.where)}.`));
+        if (!(r.detail || []).length) body.append(h("div", { class: "small muted" }, "Nothing in this part yet."));
+        for (const d of r.detail || []) body.append(h("div", { class: "xp-item" },
+          h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "nm grow t" }, bdi(d.name)), h("span", { class: "num small", style: "font-weight:700" }, ils(d.value))),
+          d.value < d.of - 1 ? h("div", { class: "why" }, `${ils(d.value)} of its ${ils(d.of)}: ` + d.pieces.map(x => `${x.what} ${ils(x.value)}`).join(", ")) : null,
+          h("div", { class: "why" }, d.why)));
+      })),
     (mx.caps || []).map(c => h("div", { class: c.over ? "small answer" : "small muted" }, `Limit ${c.name}: ${pct(c.share, 1)} of at most ${pct(c.max)}${c.over ? " — over" : " ✓"}`)),
-    mx.guessed ? h("div", { class: "small muted" }, `${mx.guessed} holding(s) have guessed tags — check them on the PC (Your mix → Tags).`) : null);
+    mx.guessed ? h("button", { class: "chip", onclick: () => tagsSheet() }, `${mx.guessed} holding(s) have guessed tags — fix them ›`) : null);
 }
 
 function strategySheet() {
   const st = D.decide.strategy || {}, M = D.money || {};
   sheet("Is the strategy working?", body => {
     if (st.mix && st.mix.drift != null) body.append(mixCard(st.mix));
-    const sl = st.sleeves || [];
+    const hz = (st.mix || {}).horizons || [];
+    const sl = hz.length ? [] : (st.sleeves || []);
+    if (hz.length) {
+      const col = { safe: "var(--save)", mid: "var(--left)", long: "var(--need)", none: "var(--muted)" };
+      const tot = hz.reduce((a, x) => a + x.value, 0) || 1;
+      body.append(h("div", { class: "card" }, h("div", { class: "kicker" }, "Money you can reach, by horizon"),
+        h("div", { style: "display:flex;height:14px;border-radius:7px;overflow:hidden;margin:10px 0" },
+          hz.map(x => h("i", { style: `width:${(100 * x.value / tot).toFixed(1)}%;background:${col[x.id]}` }))),
+        h("div", { class: "small muted" }, "Tap a horizon to see its holdings and why each is there."),
+        hz.map(x => expander([h("span", { class: "dot", style: `background:${col[x.id]}` }), h("span", { class: "grow" }, x.label),
+            h("span", { class: "small muted num" }, pct(x.value / tot)), h("span", { class: "num", style: "font-weight:700;width:86px;text-align:right" }, ils(x.value))],
+          b => { for (const it of x.holdings) b.append(h("div", { class: "xp-item" },
+            h("div", { class: "row", style: "min-height:auto" }, h("span", { class: "nm grow t" }, bdi(it.name)), h("span", { class: "num small", style: "font-weight:700" }, ils(it.value))),
+            h("div", { class: "why" }, it.why + (it.legacy ? " Legacy: gets no new money." : "")),
+            it.facts ? h("div", { class: "why" }, it.facts) : null)); }))));
+    }
     if (sl.length) {
       const col = { safe: "var(--save)", mid: "var(--left)", long: "var(--need)", cash: "var(--muted)" };
       body.append(h("div", { class: "card" }, h("div", { class: "kicker" }, "Money you can reach, by horizon"),
