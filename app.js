@@ -197,15 +197,6 @@ async function flush() {
   if (!token || !liveKey) throw new Error("not signed in");
   await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue")));
   const sent = new Set(items.map(i => i.id));
-  await idb.set("queue", ((await idb.get("queue")) || []).filter(i => !sent.has(i.id)));
-  updatePending();
-}
-async function flush() {
-  const items = (await idb.get("queue")) || [];
-  if (!items.length) return;
-  if (!token || !liveKey) throw new Error("not signed in");
-  await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue")));
-  const sent = new Set(items.map(i => i.id));
   const left = ((await idb.get("queue")) || []).filter(i => !sent.has(i.id));
   await idb.set("queue", left);
   pending = left.length; ui.refreshBadges();
