@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#4b7d3f">
+<meta name="referrer" content="no-referrer">
+<!-- connect-src is the guard that matters: this page can only talk to Google's Drive API. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com; connect-src https://www.googleapis.com https://accounts.google.com; frame-src 'self' https://accounts.google.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://accounts.google.com; worker-src 'self'">
+<title>Household finance</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="shell.css">
+<script src="https://accounts.google.com/gsi/client" async></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="bar">
+  <img src="icon-192.png" alt="" width="30" height="30">
+  <div class="grow"><b>Household finance</b><div id="fresh" class="small"></div></div>
+  <button id="refresh" class="small-btn" hidden>↻ Get latest</button>
+</header>
+<nav id="tabs" hidden></nav>
+<main>
+  <section id="screen-start" class="panel" hidden>
+    <h1>Your finance, on the phone</h1>
+    <p>This page shows the encrypted copy your PC puts in your Google Drive. Sign in with the Google account that holds it.</p>
+    <button id="signin">Sign in with Google</button>
+    <p class="small muted">The page only asks Google for the finance copy. Nothing is sent anywhere else, and the copy can only be opened with your passphrase.</p>
+  </section>
+  <section id="screen-unlock" class="panel" hidden>
+    <h1>Unlock</h1>
+    <p>Type the passphrase you set on the PC (Settings → Phone).</p>
+    <form id="unlock-form" autocomplete="off">
+      <input id="pass" type="password" autocomplete="current-password" placeholder="passphrase" required>
+      <label class="small"><input id="remember" type="checkbox" checked> Remember on this phone for 30 days</label>
+      <button id="unlock-btn">Unlock</button>
+    </form>
+    <p id="unlock-msg" class="small warn"></p>
+  </section>
+  <section id="screen-msg" class="panel" hidden><p id="msg"></p></section>
+  <section id="screen-upload" class="panel" hidden>
+    <h1>Send a file to the PC</h1>
+    <p>A bank or card export, a מסלקה report or a fund's quarterly PDF downloaded on this phone. It goes to your Drive
+      encrypted, and the PC puts it in the inbox and imports it the next time it runs.</p>
+    <input id="upload-file" type="file" accept=".xlsx,.xls,.xlsm,.csv,.html,.htm,.pdf,.txt">
+    <p><button id="upload-btn">Send to the PC</button></p>
+    <p id="upload-msg" class="small"></p>
+  </section>
+  <iframe id="view" title="finance screen" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" hidden></iframe>
+</main>
+<footer id="foot" class="small muted" hidden>
+  <span id="pending">Review answers and routine ticks are saved for the PC; the rest is read-only.</span>
+  <button id="lock" class="linkish">Lock</button>
+</footer>
+</body>
+</html>
