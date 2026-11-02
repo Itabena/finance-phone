@@ -5,12 +5,15 @@ It holds **code only** — every figure it shows comes from `snapshot.fin`, encr
 
 | File | What it does |
 |---|---|
-| `index.html`, `shell.css` | the shell: sign-in, unlock, tabs, the sandboxed frame |
-| `app.js` | Google sign-in, Drive download, unlock, remembering the key 30 days (IndexedDB, non-extractable) |
+| `index.html`, `app.css` | the shell: sign-in, unlock, top bar, bottom tab bar, sheets (PLAN-44) |
+| `app.js` | Google sign-in, Drive download, unlock, remembering the key 30 days, the queue of phone changes, uploads |
+| `ui.js` | the phone's own screens — Today, Budget, Review, Money, Send — drawn from `payload.phone` |
 | `crypto.js` | the file format — mirror of `finance/sync/crypto.py`; change both together |
-| `render.js` | turns one decrypted page into a self-contained document; answers its data requests from the snapshot |
 | `config.js` | the Google client ID (not a secret) |
 | `sw.js`, `manifest.webmanifest`, `icon-*.png` | offline start and the turtle on the home screen |
 
-**Publishing:** copy these files to the root of the `finance-phone` repository → Settings → Pages → *Deploy from a
+The data comes from `finance/sync/phone_data.py` on the PC. Rule: each tab fits on one screen; detail opens in a
+bottom sheet.
+
+**Publishing:** double-click `tools/publish-phone.cmd` (pushes with your SSH key), or copy these files to the root of the `finance-phone` repository → Settings → Pages → *Deploy from a
 branch*, `main`, `/ (root)`.

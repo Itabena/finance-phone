@@ -1,8 +1,8 @@
-// The phone shell (PLAN-43 C1): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
-// passphrase, show the screens. Read-only; the PC stays the only place where data changes.
+// The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
+// passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
 import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js";
 import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js";
-import { buildDoc } from "./render.js";
+import * as ui from "./ui.js";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -27,19 +27,23 @@ const idb = (() => {
 let blob = null;          // encrypted snapshot (ArrayBuffer), also kept in IndexedDB for offline use
 let modified = null;      // when Drive got it
 let payload = null;       // decrypted, in memory only
-let current = "/";
 let token = null, tokenClient = null;
-let liveKey = null;      // the unlocked key, in memory only (also in IndexedDB when "remember" is ticked)
+let liveKey = null;       // the unlocked key, in memory only (also in IndexedDB when "remember" is ticked)
+let local = { ticks: {}, answers: {} };   // done on the phone, not yet in a newer PC copy
+let pending = 0;
 
+const GATES = ["screen-start", "screen-unlock", "screen-msg"];
 function show(id) {
-  for (const s of ["screen-start", "screen-unlock", "screen-msg", "screen-upload"]) $(s).hidden = s !== id;
-  const viewing = id === "view" || id === "screen-upload";
-  $("view").hidden = id !== "view"; $("tabs").hidden = !viewing; $("foot").hidden = !viewing;
+  for (const s of GATES) $(s).hidden = s !== id;
+  const app = id === "app";
+  $("views").hidden = !app; $("tabbar").hidden = !app; $("menu-btn").hidden = !app;
 }
 function message(text) { $("msg").textContent = text; show("screen-msg"); }
-function toast(text) {
-  let t = $("toast"); if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.append(t); }
-  t.textContent = text; t.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 3500);
+function toast(text, action) {
+  const t = $("toast"); t.innerHTML = "";
+  t.append(document.createTextNode(text));
+  if (action) { const b = document.createElement("button"); b.textContent = action.label; b.onclick = () => { t.hidden = true; action.run(); }; t.append(b); }
+  t.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, action ? 5000 : 3200);
 }
 function ago(iso) {
   const ms = Date.now() - new Date(iso).getTime(); const h = ms / 36e5;
@@ -51,7 +55,15 @@ function getToken(interactive) {
   return new Promise((resolve, reject) => {
     if (!(window.google && google.accounts && google.accounts.oauth2)) return reject(new Error("Google sign-in did not load — check the connection."));
     if (!tokenClient) tokenClient = google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPES, callback: () => {} });
-    tokenClient.callback = r => r.error ? reject(new Error(r.error_description || r.error)) : (token = r.access_token, resolve(token));
+    tokenClient.callback = r => {
+      if (r.error) return reject(new Error(r.error_description || r.error));
+      // Google shows a tick box per permission; without "see your Drive files" the copy is invisible to this page.
+      if (!google.accounts.oauth2.hasGrantedAllScopes(r, "https://www.googleapis.com/auth/drive.readonly")) {
+        token = null;
+        return reject(new Error("Google did not give this page permission to see your Drive files. Tap “Sign in again” and, on Google's screen, tick “See and download all your Google Drive files”."));
+      }
+      token = r.access_token; resolve(token);
+    };
     tokenClient.error_callback = e => reject(new Error(e.message || e.type || "sign-in was cancelled"));
     tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
   });
@@ -66,7 +78,11 @@ async function download() {
   const q = encodeURIComponent(`name='${SNAPSHOT_NAME}' and trashed=false`);
   const list = await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id,modifiedTime,size)`)).json();
   const f = (list.files || [])[0];
-  if (!f) throw new Error("No finance copy in this Google Drive yet. On the PC: Settings → Phone → set the passphrase, and check that Google Drive for desktop is running.");
+  if (!f) {
+    let who = "";
+    try { who = (await (await drive("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)")).json()).user.emailAddress; } catch (e) { /* not essential */ }
+    throw new Error(`No finance copy found in the Google Drive of ${who || "this account"}. Check that this is the account Google Drive for desktop uses on the PC, and on drive.google.com that the folder Finance-sync holds snapshot.fin (Drive for desktop may still be uploading it).`);
+  }
   const buf = await (await drive(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).arrayBuffer();
   blob = buf; modified = f.modifiedTime;
   await idb.set("snapshot", { blob, modified });
@@ -103,51 +119,53 @@ $("unlock-form").addEventListener("submit", async e => {
   } finally { btn.disabled = false; }
 });
 
-// ---------------------------------------------------------------- showing screens
-function render() {
-  const tabs = $("tabs"); tabs.innerHTML = "";
-  for (const [path, title] of Object.entries(payload.titles || {})) {
-    const b = document.createElement("button"); b.textContent = title; b.dataset.path = path;
-    b.className = "small-btn" + (path === current ? " on" : ""); b.onclick = () => go(path); tabs.append(b);
+// ---------------------------------------------------------------- showing the app
+async function loadLocal() {
+  local = (await idb.get("local").catch(() => null)) || { ticks: {}, answers: {} };
+  const made = new Date(payload.made).getTime() || 0;          // a newer PC copy already contains these
+  for (const k of ["ticks", "answers"]) for (const [x, at] of Object.entries(local[k] || {})) if (new Date(at).getTime() < made - 60e3) delete local[k][x];
+  await idb.set("local", local).catch(() => {});
+  pending = ((await idb.get("queue").catch(() => null)) || []).length;
+}
+async function render() {
+  if (!payload.phone) {
+    message("This copy was written by an older version of the PC app. Open the app on the PC once (it rewrites the copy within a minute), then tap Try again.");
+    return;
   }
-  const up = document.createElement("button"); up.textContent = "⬆ Upload"; up.className = "small-btn";
-  up.onclick = () => { tabs.querySelectorAll("button").forEach(x => x.classList.remove("on")); up.classList.add("on"); show("screen-upload"); };
-  tabs.append(up);
-  updatePending();
-  if (!payload.pages[current]) current = "/";
-  const made = payload.made;
-  $("fresh").textContent = `From the PC ${ago(made)}` + (Date.now() - new Date(made) > 7 * 864e5 ? " — open the app on the PC to refresh it" : "");
-  $("refresh").hidden = false;
-  $("view").srcdoc = buildDoc(payload, current);
-  show("view");
+  await loadLocal();
+  $("fresh").textContent = `PC copy from ${ago(payload.made)}` + (Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "");
+  show("app");
+  ui.mount(payload.phone, ctx);
 }
-function go(href) {
-  const path = href.split(/[?#]/)[0] || "/";
-  if (!payload.pages[path]) { toast("That screen is only on the PC."); return; }
-  current = path; render(); window.scrollTo(0, 0);
-}
-window.addEventListener("message", e => {
-  if (e.source !== $("view").contentWindow || !e.data) return;
-  if (e.data.go) go(String(e.data.go));
-  if (e.data.note) toast(String(e.data.note));
-  if (e.data.queue) queueAdd(e.data.queue);
-});
+const ctx = {
+  isTicked: key => !!local.ticks[key],
+  isAnswered: desc => !!local.answers[desc],
+  pendingCount: () => pending,
+  toast,
+  async tick(key) {
+    local.ticks[key] = new Date().toISOString(); await idb.set("local", local).catch(() => {});
+    await queueAdd({ path: "/routine/done", fields: [["key", key]] });
+  },
+  // A review answer waits 5 s so it can be undone, then goes into the queue.
+  answer(desc, fields, rerender) {
+    local.answers[desc] = new Date().toISOString();
+    let undone = false;
+    const timer = setTimeout(async () => { if (undone) return; await idb.set("local", local).catch(() => {}); await queueAdd({ path: "/review", fields }, true); }, 5000);
+    toast("Filed.", { label: "Undo", run: () => { undone = true; clearTimeout(timer); delete local.answers[desc]; rerender(); } });
+  },
+  upload: uploadFile,
+};
 
 // ---------------------------------------------------------------- the phone's queue (C2) and uploads (C3)
-// Each queued button / uploaded file goes to Drive as one encrypted file in a folder this page creates itself
-// ("Finance-phone-queue"); the PC applies it with finance/sync/phone_queue.py and then republishes the snapshot.
-async function queueAdd(q) {
+// Each change goes to Drive as one encrypted file in a folder this page creates itself ("Finance-phone-queue");
+// the PC applies it with finance/sync/phone_queue.py and then republishes the snapshot.
+async function queueAdd(q, quiet) {
   const items = (await idb.get("queue")) || [];
   items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), fields: q.fields || [] });
   await idb.set("queue", items);
-  updatePending();
-  try { await flush(); toast("Saved — the PC applies it the next time it runs."); }
-  catch (e) { toast("Saved on the phone — tap Get latest to send it to the PC."); }
-}
-async function updatePending() {
-  const n = ((await idb.get("queue")) || []).length;
-  $("pending").textContent = n ? `${n} change(s) waiting to be sent — tap Get latest.` :
-    "Review answers and routine ticks are saved for the PC; the rest is read-only.";
+  pending = items.length; ui.refreshBadges();
+  try { await flush(); if (!quiet) toast("Saved — the PC applies it within a minute while it runs."); }
+  catch (e) { toast("Saved on the phone — it goes to the PC with the next Get latest."); }
 }
 async function queueFolder() {
   const known = await idb.get("queue-folder");
@@ -182,24 +200,26 @@ async function flush() {
   await idb.set("queue", ((await idb.get("queue")) || []).filter(i => !sent.has(i.id)));
   updatePending();
 }
-$("upload-btn").onclick = async () => {
-  const f = $("upload-file").files[0], msg = $("upload-msg");
-  if (!f) { msg.textContent = "Pick a file first."; return; }
-  if (f.size > 15 * 1024 * 1024) { msg.textContent = "That file is over 15 MB."; return; }
-  const btn = $("upload-btn"); btn.disabled = true; msg.textContent = "Encrypting and sending…";
-  try {
-    if (!token) await getToken(false);
-    const b64 = await new Promise((res, rej) => { const r = new FileReader();
-      r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
-    await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64 }, sealParams("upload")));
-    msg.textContent = `Sent ${f.name}. The PC imports it the next time it runs.`; $("upload-file").value = "";
-  } catch (err) { msg.textContent = "Not sent: " + err.message; }
-  finally { btn.disabled = false; }
-};
+async function flush() {
+  const items = (await idb.get("queue")) || [];
+  if (!items.length) return;
+  if (!token || !liveKey) throw new Error("not signed in");
+  await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue")));
+  const sent = new Set(items.map(i => i.id));
+  const left = ((await idb.get("queue")) || []).filter(i => !sent.has(i.id));
+  await idb.set("queue", left);
+  pending = left.length; ui.refreshBadges();
+}
+async function uploadFile(f) {
+  if (f.size > 15 * 1024 * 1024) throw new Error("that file is over 15 MB");
+  if (!token) await getToken(false);
+  const b64 = await new Promise((res, rej) => { const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
+  await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64 }, sealParams("upload")));
+}
 
 // ---------------------------------------------------------------- buttons
 async function fetchLatest(interactive) {
-  const btn = $("refresh"); btn.disabled = true; btn.textContent = "…";
   try {
     if (!token) await getToken(interactive);
     if (liveKey) await flush().catch(() => {});      // send what was done on the phone first
@@ -208,11 +228,25 @@ async function fetchLatest(interactive) {
     if (payload) toast("Up to date.");
   } catch (err) {
     if (payload) toast(err.message); else message(err.message);
-  } finally { btn.disabled = false; btn.textContent = "↻ Get latest"; }
+  }
+}
+async function lock() {
+  await idb.del("key"); payload = null; liveKey = null; ui.closeAllSheets(); $("views").innerHTML = ""; show("screen-unlock");
 }
 $("signin").onclick = () => fetchLatest(true);
-$("refresh").onclick = () => fetchLatest(false);
-$("lock").onclick = async () => { await idb.del("key"); payload = null; liveKey = null; $("view").srcdoc = ""; show("screen-unlock"); };
+$("retry").onclick = () => fetchLatest(false);
+$("resignin").onclick = () => { token = null; fetchLatest(true); };
+$("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
+  const btn = (label, sub, fn) => { const b = document.createElement("button"); b.className = "big-btn";
+    b.innerHTML = `<div>${label}</div><div class="small muted" style="font-weight:400">${sub}</div>`; b.onclick = () => { s.close(); fn(); }; return b; };
+  body.append(
+    btn("↻ Get latest", `Copy from the PC written ${ago(payload.made)}${pending ? ` · ${pending} change(s) to send` : ""}`, () => fetchLatest(false)),
+    btn("Sign in again", "Switch Google account or grant Drive permission again", () => { token = null; fetchLatest(true); }),
+    btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
+  const p = document.createElement("p"); p.className = "small muted";
+  p.textContent = "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
+  body.append(p);
+});
 
 // ---------------------------------------------------------------- start
 (async () => {
