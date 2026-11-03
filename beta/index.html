@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f3ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151a13" media="(prefers-color-scheme: dark)">
+<meta name="referrer" content="no-referrer">
+<!-- connect-src is the guard that matters: this page can only talk to Google's Drive API. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com; connect-src https://www.googleapis.com https://accounts.google.com; frame-src https://accounts.google.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://accounts.google.com; worker-src 'self'">
+<title>Household finance</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css?v=17">
+<script src="https://accounts.google.com/gsi/client" async></script>
+<script>
+  // If the app script cannot start (an old cached file, no connection), say so instead of showing a blank page.
+  window.addEventListener("error", function (e) { window.__bootError = (e.message || "") + (e.filename ? " · " + e.filename.split("/").pop() : ""); });
+  setTimeout(function () {
+    if (window.__appStarted) return;
+    document.getElementById("msg").textContent = "The app did not start" + (window.__bootError ? " (" + window.__bootError + ")" : "") +
+      ". A new version may still be on its way: tap Reload, or close the app fully and open it again.";
+    var r = document.getElementById("retry"); r.textContent = "Reload"; r.onclick = function () { location.reload(); };
+    document.getElementById("resignin").hidden = true;
+    document.getElementById("screen-msg").hidden = false;
+  }, 6000);
+</script>
+<script type="module" src="app.js?v=17"></script>
+</head>
+<body>
+<header class="top">
+  <img id="turtle" src="icon-192.png" alt="" width="34" height="34">
+  <div class="grow"><b>Household finance</b><div id="fresh" class="sub"></div></div>
+  <button id="menu-btn" class="icon-btn" aria-label="More" hidden>⋯</button>
+</header>
+
+<div id="profile-strip" hidden>TEST — fake data only</div>
+
+<main id="main">
+  <section id="screen-start" class="gate" hidden>
+    <img src="icon-512.png" alt="" width="120" height="120">
+    <h1>Your finance, on the phone</h1>
+    <p>Sign in with the Google account whose Drive holds the copy your PC writes.</p>
+    <button id="signin" class="primary">Sign in with Google</button>
+    <p class="fine">Nothing is sent anywhere but your Google Drive, and the copy opens only with your passphrase.</p>
+  </section>
+  <section id="screen-unlock" class="gate" hidden>
+    <h1>Unlock</h1>
+    <p>The passphrase you set on the PC under Settings → Phone.</p>
+    <form id="unlock-form" autocomplete="off">
+      <input id="pass" type="password" autocomplete="off" placeholder="Passphrase" required>
+      <label class="check"><input id="remember" type="checkbox" checked> Remember on this phone for 30 days</label>
+      <button id="unlock-btn" class="primary">Unlock</button>
+    </form>
+    <p id="unlock-msg" class="warn"></p>
+  </section>
+  <section id="screen-msg" class="gate" hidden>
+    <p id="msg"></p>
+    <button id="retry" class="primary">Try again</button>
+    <button id="resignin" class="ghost">Sign in again</button>
+  </section>
+  <div id="views" hidden></div>
+</main>
+
+<nav id="tabbar" hidden></nav>
+<div id="sheet-root"></div>
+<div id="toast" role="status" hidden></div>
+</body>
+</html>
