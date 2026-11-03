@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=21";
+import * as calc from "./calc.js?v=22";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 

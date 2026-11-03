@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=21";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=21";
-import * as ui from "./ui.js?v=21";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=22";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=22";
+import * as ui from "./ui.js?v=22";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -11,9 +11,9 @@ const $ = id => document.getElementById(id);
 // database, so it can never touch (or be confused with) the real copy. The page at the root is the real profile.
 const PROFILE = location.pathname.split("/").includes("beta") ? "test" : "real";
 const NAMES = PROFILE === "test"
-  ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
-  : { db: "finance-phone", snapshot: SNAPSHOT_NAME, folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
-const APP_VERSION = 21;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
+  ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", heartbeat: "heartbeat-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
+  : { db: "finance-phone", snapshot: SNAPSHOT_NAME, heartbeat: "heartbeat.fin", folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
+const APP_VERSION = 22;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
@@ -175,6 +175,7 @@ async function loadLocal() {
   for (const k of ["ticks", "answers"]) for (const [x, at] of Object.entries(local[k] || {})) if (new Date(at).getTime() < made - 60e3) delete local[k][x];
   await idb.set("local", local).catch(() => {});
   pending = ((await idb.get("queue").catch(() => null)) || []).length;      // shown by show("app") in render()
+  heartbeat = (await idb.get("heartbeat").catch(() => null)) || null;
   await refreshEntries(false);
 }
 // Waiting = still in the on-phone queue; Sent = uploaded, no receipt yet; Applied / Refused = the PC's receipt (by entry id).
@@ -215,15 +216,44 @@ async function render() {
     return;
   }
   await loadLocal();
-  const ph = payload.phone || {}, old = (ph.data || 0) < 3;      // 3 = phone_data.DATA_VERSION this page needs
-  const fresh = $("fresh");
-  fresh.textContent = `${ph.source === "test" ? "Test copy (fake data)" : ph.source === "demo" ? "Demo copy" : ph.source === "real" ? "Your data" : "PC copy"} from ${ago(payload.made)}` +
-    (old ? " · old PC version — restart the PC app" : Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "");
-  fresh.style.color = old ? "var(--warn)" : "";
-  fresh.style.fontWeight = old ? "700" : "";
+  updateFresh();
   show("app");
   ui.mount(payload.phone, ctx);
   mounted = true;
+  if (token && liveKey) fetchHeartbeat();
+}
+// The line under the title: which copy, how old, and when the PC last looked at the phone's queue (PLAN-65).
+function updateFresh() {
+  if (!payload) return;
+  const ph = payload.phone || {}, old = (ph.data || 0) < 3;      // 3 = phone_data.DATA_VERSION this page needs
+  const hb = heartbeatNote(), fresh = $("fresh");
+  fresh.textContent = `${ph.source === "test" ? "Test copy (fake data)" : ph.source === "demo" ? "Demo copy" : ph.source === "real" ? "Your data" : "PC copy"} from ${ago(payload.made)}` +
+    (old ? " · old PC version — restart the PC app" : Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "") +
+    (hb ? " · " + hb.text : "");
+  const warn = old || (hb && hb.warn);
+  fresh.style.color = warn ? "var(--warn)" : "";
+  fresh.style.fontWeight = warn ? "700" : "";
+}
+let heartbeat = null;     // {checked_at}: when the PC last looked at the queue; sealed like everything else
+function heartbeatNote() {
+  if (!heartbeat || !heartbeat.checked_at) return null;
+  const at = new Date(heartbeat.checked_at), days = (Date.now() - at.getTime()) / 864e5;
+  if (!(days >= -1)) return null;
+  if (days >= 1) { const n = Math.floor(days); return { text: `the PC has not checked in ${n} day${n > 1 ? "s" : ""} — entries wait`, warn: true }; }
+  return { text: `PC checked ${at.toDateString() === new Date().toDateString() ? "" : "yesterday "}${at.toTimeString().slice(0, 5)}`, warn: false };
+}
+async function fetchHeartbeat() {
+  try {
+    const q = encodeURIComponent(`name='${NAMES.heartbeat}' and trashed=false`);
+    const list = await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id)`)).json();
+    const f = (list.files || [])[0];
+    if (!f) return;
+    const buf = await (await drive(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).arrayBuffer();
+    const { payload: p } = await openSealed(liveKey, buf);
+    heartbeat = { checked_at: p.checked_at };
+    await idb.set("heartbeat", heartbeat).catch(() => {});
+    updateFresh();
+  } catch (e) { /* a courtesy from the PC: its absence never stops anything */ }
 }
 const ctx = {
   isTicked: key => !!local.ticks[key],
@@ -276,6 +306,7 @@ async function checkForNewer() {
   if (!token || !liveKey || fetching || waitingCopy || !payload) return;
   fetching = true;
   try {
+    await fetchHeartbeat();
     const f = await latestMeta();
     if (!f || (modified && f.modifiedTime <= modified)) return;
     await flush().catch(() => {});                                   // what was done here goes out before the copy changes
@@ -400,6 +431,9 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
     btn("Layout report", "Screen size, keyboard and tab bar measurements — no data in it", layoutSheet),
     btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
   const p = document.createElement("p"); p.className = "small muted";
+  const hb = heartbeatNote(), pcLine = document.createElement("p"); pcLine.className = "small muted";
+  pcLine.textContent = hb ? hb.text[0].toUpperCase() + hb.text.slice(1) + "." : "PC check time unknown (the PC app is older, or has not checked yet).";
+  body.append(pcLine);
   p.textContent = `Phone app v${APP_VERSION}${PROFILE === "test" ? " · beta · test profile (fake data)" : ""}. ` + "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
   body.append(p);
 });
