@@ -7,19 +7,13 @@ import * as ui from "./ui.js?v=16";
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
 const $ = id => document.getElementById(id);
-// PLAN-52: the page served under /beta/ is the TEST profile only: fake data, its own Drive names, its own on-phone
-// database, so it can never touch (or be confused with) the real copy. The page at the root is the real profile.
-const PROFILE = location.pathname.split("/").includes("beta") ? "test" : "real";
-const NAMES = PROFILE === "test"
-  ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
-  : { db: "finance-phone", snapshot: SNAPSHOT_NAME, folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
 const APP_VERSION = 16;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
   let dbp;
   const db = () => dbp || (dbp = new Promise((res, rej) => {
-    const r = indexedDB.open(NAMES.db, 1);
+    const r = indexedDB.open("finance-phone", 1);
     r.onupgradeneeded = () => r.result.createObjectStore("kv");
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   }));
@@ -92,13 +86,13 @@ async function drive(url, opts = {}) {
   return r;
 }
 async function download() {
-  const q = encodeURIComponent(`name='${NAMES.snapshot}' and trashed=false`);
+  const q = encodeURIComponent(`name='${SNAPSHOT_NAME}' and trashed=false`);
   const list = await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id,modifiedTime,size)`)).json();
   const f = (list.files || [])[0];
   if (!f) {
     let who = "";
     try { who = (await (await drive("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)")).json()).user.emailAddress; } catch (e) { /* not essential */ }
-    throw new Error(`No finance copy found in the Google Drive of ${who || "this account"}. Check that this is the account Google Drive for desktop uses on the PC, and on drive.google.com that the folder ${NAMES.drive} holds ${NAMES.snapshot} (Drive for desktop may still be uploading it).`);
+    throw new Error(`No finance copy found in the Google Drive of ${who || "this account"}. Check that this is the account Google Drive for desktop uses on the PC, and on drive.google.com that the folder Finance-sync holds snapshot.fin (Drive for desktop may still be uploading it).`);
   }
   const buf = await (await drive(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).arrayBuffer();
   blob = buf; modified = f.modifiedTime;
@@ -153,7 +147,7 @@ async function render() {
   await loadLocal();
   const ph = payload.phone || {}, old = (ph.data || 0) < 3;      // 3 = phone_data.DATA_VERSION this page needs
   const fresh = $("fresh");
-  fresh.textContent = `${ph.source === "test" ? "Test copy (fake data)" : ph.source === "demo" ? "Demo copy" : ph.source === "real" ? "Your data" : "PC copy"} from ${ago(payload.made)}` +
+  fresh.textContent = `${ph.source === "demo" ? "Demo copy" : ph.source === "real" ? "Your data" : "PC copy"} from ${ago(payload.made)}` +
     (old ? " · old PC version — restart the PC app" : Date.now() - new Date(payload.made) > 7 * 864e5 ? " — open the PC app to refresh" : "");
   fresh.style.color = old ? "var(--warn)" : "";
   fresh.style.fontWeight = old ? "700" : "";
@@ -207,11 +201,11 @@ async function queueAdd(q, quiet) {
 async function queueFolder() {
   const known = await idb.get("queue-folder");
   if (known) return known;
-  const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and appProperties has { key='financePhone' and value='${NAMES.marker}' } and trashed=false`);
+  const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and appProperties has { key='financePhone' and value='queue' } and trashed=false");
   const found = (await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&pageSize=1`)).json()).files || [];
   const id = found.length ? found[0].id : (await (await drive("https://www.googleapis.com/drive/v3/files?fields=id", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: NAMES.folder, mimeType: "application/vnd.google-apps.folder", appProperties: { financePhone: NAMES.marker } }),
+    body: JSON.stringify({ name: "Finance-phone-queue", mimeType: "application/vnd.google-apps.folder", appProperties: { financePhone: "queue" } }),
   })).json()).id;
   await idb.set("queue-folder", id);
   return id;
@@ -226,7 +220,7 @@ async function putSealed(name, bytes) {
 }
 function sealParams(kind) {
   const { header } = readHeader(blob);
-  return { salt: header.salt, iterations: header.iter, kind, made: new Date().toISOString(), profile: PROFILE };
+  return { salt: header.salt, iterations: header.iter, kind, made: new Date().toISOString() };
 }
 async function flush() {
   const items = (await idb.get("queue")) || [];
@@ -274,14 +268,13 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
     btn("Sign in again", "Switch Google account or grant Drive permission again", () => { token = null; fetchLatest(true); }),
     btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
   const p = document.createElement("p"); p.className = "small muted";
-  p.textContent = `Phone app v${APP_VERSION}${PROFILE === "test" ? " · beta · test profile (fake data)" : ""}. ` + "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
+  p.textContent = `Phone app v${APP_VERSION}. ` + "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
   body.append(p);
 });
 
 // ---------------------------------------------------------------- start
 (async () => {
   window.__appStarted = true;
-  if (PROFILE === "test") { $("profile-strip").hidden = false; document.title = "Household finance (beta)"; }
   if ("serviceWorker" in navigator) {
     // A new version takes over while this page still runs the old code: offer a reload instead of mixing the two.
     const hadOne = !!navigator.serviceWorker.controller;

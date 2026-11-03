@@ -42,9 +42,8 @@ export async function openSealed(key, buf) {
 }
 
 // For the phone's queue (C2): same format, so the PC opens it with finance/sync/crypto.py.
-export async function seal(key, payload, { salt, iterations, kind, made, profile }) {
+export async function seal(key, payload, { salt, iterations, kind, made }) {
   const header = { v: 1, kdf: "PBKDF2-SHA256", iter: iterations, salt, iv: b64(crypto.getRandomValues(new Uint8Array(12))), kind, made };
-  if (profile) header.profile = profile;      // PLAN-51/52: "real" or "test"; the PC applies only its own profile's files
   const hb = new TextEncoder().encode(JSON.stringify(header));
   const prefix = new Uint8Array(12 + hb.length);
   prefix.set(new TextEncoder().encode(MAGIC), 0);

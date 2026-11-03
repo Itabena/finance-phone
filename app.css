@@ -40,10 +40,6 @@ bdi, .he { unicode-bidi: plaintext; }
 .icon-btn { width: 44px; height: 44px; border-radius: 50%; border: 0; background: transparent; font-size: 22px; line-height: 1; }
 .icon-btn:active { background: var(--accent-soft); }
 
-/* ---- the beta / test profile strip (PLAN-52) ---- */
-#profile-strip { flex: none; text-align: center; font-size: 12.5px; font-weight: 800; letter-spacing: .08em; padding: 3px 8px;
-  background: #f2c94c; color: #3a2d00; }
-
 /* ---- main area: each tab is one screen ---- */
 main { flex: 1; min-height: 0; position: relative; }
 #views { height: 100%; }
