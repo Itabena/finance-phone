@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=19";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=19";
-import * as ui from "./ui.js?v=19";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=21";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=21";
+import * as ui from "./ui.js?v=21";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -13,7 +13,7 @@ const PROFILE = location.pathname.split("/").includes("beta") ? "test" : "real";
 const NAMES = PROFILE === "test"
   ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
   : { db: "finance-phone", snapshot: SNAPSHOT_NAME, folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
-const APP_VERSION = 19;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
+const APP_VERSION = 21;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
@@ -47,6 +47,14 @@ const LABELS = {          // what an entry is called in "Sent from this phone" (
   "/tx/remove": "Remove a transaction", "/review": "Review answer", "/review/accept-suggestions": "Accept suggestions",
   "/routine/done": "Routine ticked", "/next/done": "I did it (next ₪)",
 };
+// What a value-typing entry said, so the screens can show it as "pending" until the PC confirms it (PLAN-61).
+function echoOf(path, fields) {
+  const f = Object.fromEntries((fields || []).map(([k, v]) => [k, v]));
+  if (path === "/settings/cash") return { kind: "cash", value: Number(f.value) };
+  if (path === "/settings/commitment") return { kind: "commitment", value: Number(f.value) };
+  if (path === "/hold/balance" && f.k0 !== undefined) return { kind: `hv:${f.k0}@${f.account}`, value: Number(f.v0) };
+  return null;
+}
 const labelFor = path => LABELS[path] || (/^\/proposal\/\d+\/(accept|reject)$/.test(path) ? "Proposal answer" : "Change");
 
 const GATES = ["screen-start", "screen-unlock", "screen-msg"];
@@ -104,14 +112,20 @@ function getToken(interactive, patient) {      // patient: started by a tap, so 
 // The app opens from the copy saved on the phone and does not ask Google for anything (PLAN-55).
 async function drive(url, opts = {}) {
   const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
-  if (r.status === 401) { token = null; throw new Error("Google sign-in expired — tap Get latest again."); }
+  if (r.status === 401) { token = null; updateBanner(); throw new Error("Google sign-in expired — tap Send or Get latest to sign in again."); }
+  if (r.status === 429) throw new Error("Google Drive is busy (429) — try again in a minute.");
+  if (r.status >= 500) throw new Error(`Google Drive had a problem (${r.status}) — try again in a minute.`);
+  if (r.status === 403) throw new Error("Google Drive refused (403) — tap Sign in again under ⋯ and tick the Drive permissions.");
   if (!r.ok) throw new Error(`Google Drive answered ${r.status}`);
   return r;
 }
-async function download() {
+async function latestMeta() {
   const q = encodeURIComponent(`name='${NAMES.snapshot}' and trashed=false`);
   const list = await (await drive(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id,modifiedTime,size)`)).json();
-  const f = (list.files || [])[0];
+  return (list.files || [])[0];
+}
+async function download() {
+  const f = await latestMeta();
   if (!f) {
     let who = "";
     try { who = (await (await drive("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)")).json()).user.emailAddress; } catch (e) { /* not essential */ }
@@ -166,11 +180,11 @@ async function loadLocal() {
 // Waiting = still in the on-phone queue; Sent = uploaded, no receipt yet; Applied / Refused = the PC's receipt (by entry id).
 // A PC copy from older code carries no receipts at all: then "Sent" is all that can honestly be said.
 async function refreshEntries(redraw = true) {
-  const waiting = ((await idb.get("queue").catch(() => null)) || []).map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at, state: "waiting" }));
+  const waiting = ((await idb.get("queue").catch(() => null)) || []).map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at, state: "waiting", echo: i.echo || null }));
   const log = (await idb.get("sentlog").catch(() => null)) || [];
   const receipts = payload && payload.phone && payload.phone.receipts;
   const byId = new Map((Array.isArray(receipts) ? receipts : []).map(r => [r.id, r]));
-  const sent = log.map(e => { const r = byId.get(e.id); return { id: e.id, label: e.label, at: e.at, state: r ? r.status : "sent", why: r && r.why, unconfirmable: !Array.isArray(receipts) }; });
+  const sent = log.map(e => { const r = byId.get(e.id); return { id: e.id, label: e.label, at: e.at, echo: e.echo || null, state: r ? r.status : "sent", why: r && r.why, detail: r && r.detail, unconfirmable: !Array.isArray(receipts) }; });
   entries = [...waiting, ...sent].sort((a, b) => String(b.at).localeCompare(String(a.at)));
   if (redraw && mounted && payload) ui.refreshBadges();
   updateBanner();
@@ -178,6 +192,7 @@ async function refreshEntries(redraw = true) {
 const STATE_WORDS = { waiting: "Waiting", sent: "Sent", applied: "Applied", refused: "Refused" };
 function entriesSheet() {
   ui.sheet("Sent from this phone", body => {
+    for (const n of ctx.notices()) { const w = document.createElement("div"); w.className = "card small"; w.style.background = "var(--warn-soft)"; w.textContent = n.text; body.append(w); }
     if (!entries.length) { const p = document.createElement("p"); p.className = "muted"; p.textContent = "Nothing has been done on this phone yet."; body.append(p); return; }
     for (const e of entries) {
       const row = document.createElement("div"); row.className = "entry";
@@ -187,6 +202,7 @@ function entriesSheet() {
       top.append(label, state);
       const when = document.createElement("div"); when.className = "small muted"; when.textContent = ago(e.at);
       row.append(top, when);
+      if (e.state === "applied" && e.detail) { const w = document.createElement("div"); w.className = "small muted"; w.textContent = e.detail; row.append(w); }
       if (e.state === "refused" && e.why) { const w = document.createElement("div"); w.className = "small"; w.style.color = "var(--warn)"; w.textContent = e.why; row.append(w); }
       if (e.state === "sent" && e.unconfirmable) { const w = document.createElement("div"); w.className = "small muted"; w.textContent = "The PC copy is too old to confirm this — open the PC app, then Get latest."; row.append(w); }
       body.append(row);
@@ -214,7 +230,12 @@ const ctx = {
   isAnswered: desc => !!local.answers[desc],
   pendingCount: () => pending,
   refusedCount: () => entries.filter(e => e.state === "refused").length,
+  // The newest typed value of this kind that the PC has not confirmed yet (waiting or sent), or its refusal. Applied ones
+  // are already in the PC's copy, so they need no echo.
+  pendingEcho: kind => { const e = entries.find(x => x.echo && x.echo.kind === kind); return e && (e.state === "waiting" || e.state === "sent") ? e.echo : null; },
+  refusedEcho: kind => { const e = entries.find(x => x.echo && x.echo.kind === kind); return e && e.state === "refused" ? e : null; },
   openEntries: () => entriesSheet(),
+  notices: () => (payload && payload.phone && payload.phone.notices) || [],
   sentFiles: () => local.sent || [],
   async send(path, fields) { await queueAdd({ path, fields }); },
   toast,
@@ -242,8 +263,42 @@ async function sendNow() {
   updateBanner();
 }
 $("sync-send").onclick = sendNow;
-// Back in the app, or the connection returns: if a token already exists, send what waits (never starts a sign-in).
-function tryQuietSend() { if (token && liveKey && pending) flush().catch(() => {}).finally(updateBanner); }
+// Back in the app, or the connection returns: if a token already exists, send what waits and look for a newer PC copy
+// (never starts a sign-in).
+function tryQuietSend() {
+  if (token && liveKey && pending) flush().catch(() => {}).finally(updateBanner);
+  checkForNewer();
+}
+// PLAN-62: a newer PC copy is fetched quietly and swapped in only between interactions: no sheet open, no field focused.
+let fetching = false, waitingCopy = null, idleTimer = null;
+const idle = () => !document.querySelector(".sheet") && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "");
+async function checkForNewer() {
+  if (!token || !liveKey || fetching || waitingCopy || !payload) return;
+  fetching = true;
+  try {
+    const f = await latestMeta();
+    if (!f || (modified && f.modifiedTime <= modified)) return;
+    await flush().catch(() => {});                                   // what was done here goes out before the copy changes
+    const buf = await (await drive(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).arrayBuffer();
+    waitingCopy = { buf, modified: f.modifiedTime };
+    swapWhenIdle();
+  } catch (e) { /* quiet: the person did not ask for this */ } finally { fetching = false; }
+}
+function swapWhenIdle() {
+  clearInterval(idleTimer);
+  const go = async () => {
+    if (!waitingCopy || !idle()) return;
+    clearInterval(idleTimer);
+    const c = waitingCopy; waitingCopy = null;
+    blob = c.buf; modified = c.modified;
+    await idb.set("snapshot", { blob, modified });
+    await open();
+    if (payload) toast(`Updated — PC copy of ${new Date(payload.made).toTimeString().slice(0, 5)}`);
+  };
+  idleTimer = setInterval(go, 700);
+  go();
+}
+setInterval(() => { if (document.visibilityState === "visible") checkForNewer(); }, 5 * 60e3);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") tryQuietSend(); });
 window.addEventListener("online", tryQuietSend);
 
@@ -254,7 +309,7 @@ async function queueAdd(q, quiet) {
   // quiet = a review answer sent 5 s after the tap: no toast. Saving never starts a sign-in (PLAN-55); it sends only
   // when a token already exists, otherwise the entry waits on the phone and the banner offers Send.
   const items = (await idb.get("queue")) || [];
-  items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), label: labelFor(String(q.path)), fields: q.fields || [] });
+  items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), label: labelFor(String(q.path)), echo: echoOf(String(q.path), q.fields), fields: q.fields || [] });
   await idb.set("queue", items);
   setPending(items.length);
   try { await flush(); if (!quiet) toast("Sent — the PC applies it within a minute while it runs."); }
@@ -296,7 +351,7 @@ async function doFlush() {
   try { await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue"))); }
   catch (e) { netDown = e instanceof TypeError; updateBanner(); throw e; }
   netDown = false;
-  const log = ((await idb.get("sentlog").catch(() => null)) || []).concat(items.map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at })));
+  const log = ((await idb.get("sentlog").catch(() => null)) || []).concat(items.map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at, echo: i.echo || null })));
   await idb.set("sentlog", log.slice(-50));                                  // the last 50, to match the PC's receipts
   const sent = new Set(items.map(i => i.id));
   const left = ((await idb.get("queue")) || []).filter(i => !sent.has(i.id));
@@ -308,7 +363,11 @@ async function uploadFile(f, what) {
   if (!token) await getToken(false, true);
   const b64 = await new Promise((res, rej) => { const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
-  await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64, what: what || "" }, sealParams("upload")));
+  const id = crypto.randomUUID(), at = new Date().toISOString();
+  await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { id, name: f.name, b64, what: what || "" }, sealParams("upload")));
+  const log = ((await idb.get("sentlog").catch(() => null)) || []).concat([{ id, label: "File: " + f.name, at }]);
+  await idb.set("sentlog", log.slice(-50));
+  refreshEntries();
   local.sent = [...(local.sent || []), { name: f.name, what: what || "", at: new Date().toISOString() }];
   await idb.set("local", local).catch(() => {});
 }

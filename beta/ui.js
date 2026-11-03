@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=19";
+import * as calc from "./calc.js?v=21";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -105,6 +105,10 @@ function renderAll() { renderToday(); renderBudget(); renderMoney(); renderTodo(
 function renderToday() {
   const v = $("#v-today"); v.innerHTML = "";
   oldCopyNote(v);
+  for (const n of (C.notices ? C.notices() : []))                       // PLAN-58: the PC could not open some files
+    v.append(h("div", { class: "card tap", style: "background:var(--warn-soft)", onclick: () => C.openEntries() },
+      h("div", { style: "font-weight:800;color:var(--warn)" }, `${n.count} file${n.count > 1 ? "s" : ""} the PC could not open`),
+      h("div", { class: "small", style: "margin-top:4px" }, n.text)));
   const refused = C.refusedCount ? C.refusedCount() : 0;               // PLAN-56: entries the PC could not apply
   if (refused) v.append(h("div", { class: "card tap", style: "background:var(--warn-soft)", onclick: () => C.openEntries() },
     h("div", { style: "font-weight:800;color:var(--warn)" }, `${refused} change${refused > 1 ? "s" : ""} the PC refused`),
@@ -282,11 +286,18 @@ function filesSheet(groups, title, funds) {
         h("span", { class: "grow" }, h("div", { style: "font-weight:700" }, "Type the bank balance"), h("div", { class: "small muted" }, "the spending itself still needs the file")), h("span", { class: "muted" }, "›"))));
   });
 }
+// Under a typed value: "pending" while the PC has not confirmed it, or why it refused (PLAN-61).
+function echoLine(body, kind) {
+  const p = C.pendingEcho ? C.pendingEcho(kind) : null, r = C.refusedEcho ? C.refusedEcho(kind) : null;
+  if (p) body.append(h("p", { class: "small", style: "margin:0;color:var(--warn);font-weight:700" }, `Typed ${ils(p.value)} — pending: the PC has not confirmed it yet.`));
+  else if (r) body.append(h("p", { class: "small", style: "margin:0;color:var(--warn);font-weight:700" }, `The PC refused your last entry: ${r.why || "no reason given"}.`));
+}
 function cashSheet() {
   const c = (D.fill || {}).cash || {};
   sheet("Bank balance", body => {
     const v = input("number", { placeholder: "₪", value: "" }), d = input("date", { value: today() }), n = input("text", { placeholder: "e.g. Leumi app" });
     body.append(h("p", { class: "small muted", style: "margin:0" }, c.value != null ? `Last: ${ils(c.value)} on ${c.as_of}.` : "Not entered yet."));
+    echoLine(body, "cash");
     body.append(h("div", { class: "fill-form" }, fieldOf("Balance today (₪)", v), fieldOf("Date", d), fieldOf("Where you read it", n),
       sendForm("cash", "/settings/cash", m => { if (!v.value || !n.value.trim()) { m.textContent = "The balance and where you read it are both needed."; return null; }
         return [["value", v.value], ["as_of", d.value], ["note", n.value.trim()]]; })));
@@ -297,6 +308,7 @@ function commitmentSheet() {
   sheet("Monthly savings", body => {
     const v = input("number", { placeholder: "₪ a month", value: c.value != null ? Math.round(c.value) : "" });
     body.append(h("p", { class: "small muted", style: "margin:0" }, "What you commit to set aside each month (pay yourself first). Decide → Set aside shows what the budget allows."));
+    echoLine(body, "commitment");
     body.append(h("div", { class: "fill-form" }, fieldOf("Each month (₪)", v),
       sendForm("commitment", "/settings/commitment", m => { if (!v.value) { m.textContent = "Type an amount."; return null; } return [["value", v.value]]; })));
   });
@@ -359,6 +371,7 @@ function holdingSheet(id) {
   sheet(x.name, body => {
     body.append(h("div", { class: "card" }, h("div", { class: "big num" }, ils(x.value)),
       h("div", { class: "small muted", style: "margin-top:4px" }, `${x.account_name} · statement ${x.as_of || "—"}`)));
+    echoLine(body, `hv:${x.instrument}@${x.account}`);
     // value
     const v = input("number", { value: Math.round(x.value) }), d = input("date", { value: today() }), n = input("text", { placeholder: "e.g. provider app" });
     body.append(expander([h("span", { class: "grow", style: "font-weight:700" }, "Correct the value")], b => b.append(h("div", { class: "fill-form" },
@@ -905,7 +918,7 @@ function todoModel() {
   const F = D.fill || {}, X = D.decide || {}, R = D.routine || { tasks: { month: [], quarter: [], year: [] } };
   const out = { today: [], month: [], quarter: [], year: [] };
   const keys = new Set((F.todo || []).map(t => t.key)), byKey = Object.fromEntries((F.todo || []).map(t => [t.key, t]));
-  const fill = (period, key, open, title) => { const t = byKey[key]; if (t) out[period].push({ type: "fill", title: title || t.title, sub: [t.minutes ? `~${t.minutes} min` : null, t.unlocks ? `unlocks ${t.unlocks}` : null].filter(Boolean).join(" · "), open }); };
+  const fill = (period, key, open, title) => { const t = byKey[key]; if (t) out[period].push({ type: "fill", pend: C.pendingEcho ? C.pendingEcho(key) : null, title: title || t.title, sub: [t.minutes ? `~${t.minutes} min` : null, t.unlocks ? `unlocks ${t.unlocks}` : null].filter(Boolean).join(" · "), open }); };
   const waiting = C.pendingCount ? C.pendingCount() : 0;
   if (waiting) out.today.push({ type: "fill", title: `${waiting} change(s) still on this phone`, sub: "not sent to Drive yet — tap to send now", open: () => C.flushNow && C.flushNow() });
   const q = ((D.review || {}).queue || []).filter(g => !C.isAnswered(g.description));
@@ -944,6 +957,7 @@ function todoRow(x) {
   const pill = x.type === "decision" ? h("span", { class: "pill", style: "flex:none" }, "decide") : x.type === "info" ? h("span", { class: "pill", style: "flex:none;opacity:.7" }, "PC") : null;
   return h(x.open ? "button" : "div", { class: "row", style: "width:100%;border:0;background:none;text-align:left;padding:6px 0" + (x.done ? ";opacity:.6" : ""), onclick: x.open || null },
     h("span", { class: "grow", style: "min-width:0" }, h("div", { class: "t", style: "font-weight:700" }, x.done ? "✓ " + x.title : x.title), x.sub ? h("div", { class: "small muted t" }, x.sub) : null),
+    x.pend ? h("span", { class: "pill", style: "flex:none;background:var(--warn-soft);color:var(--warn)" }, `pending ${ils(x.pend.value)}`) : null,
     pill, x.open ? h("span", { class: "muted" }, "›") : null);
 }
 function renderTodo() {
