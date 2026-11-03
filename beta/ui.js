@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=18";
+import * as calc from "./calc.js?v=19";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -105,6 +105,10 @@ function renderAll() { renderToday(); renderBudget(); renderMoney(); renderTodo(
 function renderToday() {
   const v = $("#v-today"); v.innerHTML = "";
   oldCopyNote(v);
+  const refused = C.refusedCount ? C.refusedCount() : 0;               // PLAN-56: entries the PC could not apply
+  if (refused) v.append(h("div", { class: "card tap", style: "background:var(--warn-soft)", onclick: () => C.openEntries() },
+    h("div", { style: "font-weight:800;color:var(--warn)" }, `${refused} change${refused > 1 ? "s" : ""} the PC refused`),
+    h("div", { class: "small", style: "margin-top:4px" }, "Tap to see which one and why.")));
   const ym = (D.months || []).slice(-1)[0];
   const m = ym && D.budget[ym];
   const t = D.turtle || {};

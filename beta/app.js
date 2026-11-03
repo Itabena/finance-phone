@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=18";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=18";
-import * as ui from "./ui.js?v=18";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=19";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=19";
+import * as ui from "./ui.js?v=19";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -13,7 +13,7 @@ const PROFILE = location.pathname.split("/").includes("beta") ? "test" : "real";
 const NAMES = PROFILE === "test"
   ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
   : { db: "finance-phone", snapshot: SNAPSHOT_NAME, folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
-const APP_VERSION = 18;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
+const APP_VERSION = 19;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
@@ -38,6 +38,16 @@ let token = null, tokenClient = null;
 let liveKey = null;       // the unlocked key, in memory only (also in IndexedDB when "remember" is ticked)
 let local = { ticks: {}, answers: {}, sent: [] };   // done on the phone, not yet in a newer PC copy
 let pending = 0;
+let entries = [];         // PLAN-56: everything done on this phone with its state: waiting, sent, applied or refused
+let mounted = false;      // ui.mount has run, so the screens can be redrawn
+const LABELS = {          // what an entry is called in "Sent from this phone" (never an amount)
+  "/settings/cash": "Bank balance", "/settings/commitment": "Monthly savings", "/hold/balance": "Holding value",
+  "/hold/classify": "Classify a holding", "/hold/pot": "Choose a pot", "/hold/confirm": "Confirm holdings", "/mix/tags": "Mix tags",
+  "/tx/category": "Transaction category", "/tx/hide": "Hide a transaction", "/tx/fix": "Fix a transaction", "/tx/add": "Add a transaction",
+  "/tx/remove": "Remove a transaction", "/review": "Review answer", "/review/accept-suggestions": "Accept suggestions",
+  "/routine/done": "Routine ticked", "/next/done": "I did it (next ₪)",
+};
+const labelFor = path => LABELS[path] || (/^\/proposal\/\d+\/(accept|reject)$/.test(path) ? "Proposal answer" : "Change");
 
 const GATES = ["screen-start", "screen-unlock", "screen-msg"];
 function show(id) {
@@ -49,7 +59,7 @@ function show(id) {
 // PLAN-55: what waits on the phone is always visible. Saving never opens Google; sending needs a token, and a token
 // comes only from a tap (Send, Get latest, Sign in).
 let netDown = false;       // the last attempt to reach Drive failed for want of a connection
-function setPending(n) { pending = n; ui.refreshBadges(); updateBanner(); }
+function setPending(n) { pending = n; updateBanner(); refreshEntries(); }
 function updateBanner() {
   const b = $("sync-banner");
   b.hidden = !(pending > 0 && !$("views").hidden);
@@ -150,7 +160,38 @@ async function loadLocal() {
   const made = new Date(payload.made).getTime() || 0;          // a newer PC copy already contains these
   for (const k of ["ticks", "answers"]) for (const [x, at] of Object.entries(local[k] || {})) if (new Date(at).getTime() < made - 60e3) delete local[k][x];
   await idb.set("local", local).catch(() => {});
-  pending = ((await idb.get("queue").catch(() => null)) || []).length;
+  pending = ((await idb.get("queue").catch(() => null)) || []).length;      // shown by show("app") in render()
+  await refreshEntries(false);
+}
+// Waiting = still in the on-phone queue; Sent = uploaded, no receipt yet; Applied / Refused = the PC's receipt (by entry id).
+// A PC copy from older code carries no receipts at all: then "Sent" is all that can honestly be said.
+async function refreshEntries(redraw = true) {
+  const waiting = ((await idb.get("queue").catch(() => null)) || []).map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at, state: "waiting" }));
+  const log = (await idb.get("sentlog").catch(() => null)) || [];
+  const receipts = payload && payload.phone && payload.phone.receipts;
+  const byId = new Map((Array.isArray(receipts) ? receipts : []).map(r => [r.id, r]));
+  const sent = log.map(e => { const r = byId.get(e.id); return { id: e.id, label: e.label, at: e.at, state: r ? r.status : "sent", why: r && r.why, unconfirmable: !Array.isArray(receipts) }; });
+  entries = [...waiting, ...sent].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  if (redraw && mounted && payload) ui.refreshBadges();
+  updateBanner();
+}
+const STATE_WORDS = { waiting: "Waiting", sent: "Sent", applied: "Applied", refused: "Refused" };
+function entriesSheet() {
+  ui.sheet("Sent from this phone", body => {
+    if (!entries.length) { const p = document.createElement("p"); p.className = "muted"; p.textContent = "Nothing has been done on this phone yet."; body.append(p); return; }
+    for (const e of entries) {
+      const row = document.createElement("div"); row.className = "entry";
+      const top = document.createElement("div"); top.className = "entry-top";
+      const label = document.createElement("b"); label.className = "label"; label.textContent = e.label;
+      const state = document.createElement("span"); state.className = "state state-" + e.state; state.textContent = STATE_WORDS[e.state];
+      top.append(label, state);
+      const when = document.createElement("div"); when.className = "small muted"; when.textContent = ago(e.at);
+      row.append(top, when);
+      if (e.state === "refused" && e.why) { const w = document.createElement("div"); w.className = "small"; w.style.color = "var(--warn)"; w.textContent = e.why; row.append(w); }
+      if (e.state === "sent" && e.unconfirmable) { const w = document.createElement("div"); w.className = "small muted"; w.textContent = "The PC copy is too old to confirm this — open the PC app, then Get latest."; row.append(w); }
+      body.append(row);
+    }
+  });
 }
 async function render() {
   if (!payload.phone) {
@@ -166,11 +207,14 @@ async function render() {
   fresh.style.fontWeight = old ? "700" : "";
   show("app");
   ui.mount(payload.phone, ctx);
+  mounted = true;
 }
 const ctx = {
   isTicked: key => !!local.ticks[key],
   isAnswered: desc => !!local.answers[desc],
   pendingCount: () => pending,
+  refusedCount: () => entries.filter(e => e.state === "refused").length,
+  openEntries: () => entriesSheet(),
   sentFiles: () => local.sent || [],
   async send(path, fields) { await queueAdd({ path, fields }); },
   toast,
@@ -210,7 +254,7 @@ async function queueAdd(q, quiet) {
   // quiet = a review answer sent 5 s after the tap: no toast. Saving never starts a sign-in (PLAN-55); it sends only
   // when a token already exists, otherwise the entry waits on the phone and the banner offers Send.
   const items = (await idb.get("queue")) || [];
-  items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), fields: q.fields || [] });
+  items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), label: labelFor(String(q.path)), fields: q.fields || [] });
   await idb.set("queue", items);
   setPending(items.length);
   try { await flush(); if (!quiet) toast("Sent — the PC applies it within a minute while it runs."); }
@@ -252,6 +296,8 @@ async function doFlush() {
   try { await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue"))); }
   catch (e) { netDown = e instanceof TypeError; updateBanner(); throw e; }
   netDown = false;
+  const log = ((await idb.get("sentlog").catch(() => null)) || []).concat(items.map(i => ({ id: i.id, label: i.label || labelFor(i.path), at: i.at })));
+  await idb.set("sentlog", log.slice(-50));                                  // the last 50, to match the PC's receipts
   const sent = new Set(items.map(i => i.id));
   const left = ((await idb.get("queue")) || []).filter(i => !sent.has(i.id));
   await idb.set("queue", left);
@@ -291,6 +337,7 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
   body.append(
     btn("↻ Get latest", `Copy from the PC written ${ago(payload.made)}${pending ? ` · ${pending} change(s) to send` : ""}`, () => fetchLatest(false)),
     btn("Sign in again", "Switch Google account or grant Drive permission again", () => { token = null; fetchLatest(true); }),
+    btn("Sent from this phone", entries.length ? `${entries.length} entr${entries.length > 1 ? "ies" : "y"} — waiting, sent, applied or refused` : "Nothing yet", entriesSheet),
     btn("Layout report", "Screen size, keyboard and tab bar measurements — no data in it", layoutSheet),
     btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
   const p = document.createElement("p"); p.className = "small muted";
