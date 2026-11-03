@@ -1,8 +1,8 @@
 // The phone shell (PLAN-43 C, PLAN-44): sign in to Google, download the encrypted snapshot from Drive, unlock it with the
 // passphrase, hand the data to ui.js, and send what was done on the phone back to the PC as encrypted queue files.
-import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=17";
-import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=17";
-import * as ui from "./ui.js?v=17";
+import { CLIENT_ID, SNAPSHOT_NAME, REMEMBER_DAYS } from "./config.js?v=18";
+import { deriveKey, openSealed, readHeader, seal, WrongKey } from "./crypto.js?v=18";
+import * as ui from "./ui.js?v=18";
 
 // drive.readonly finds the copy Drive for desktop uploaded; drive.file is for the phone's own queue files (C2).
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
@@ -13,7 +13,7 @@ const PROFILE = location.pathname.split("/").includes("beta") ? "test" : "real";
 const NAMES = PROFILE === "test"
   ? { db: "finance-phone-test", snapshot: "snapshot-test.fin", folder: "Finance-phone-queue-test", marker: "queue-test", drive: "Finance-sync-test" }
   : { db: "finance-phone", snapshot: SNAPSHOT_NAME, folder: "Finance-phone-queue", marker: "queue", drive: "Finance-sync" };
-const APP_VERSION = 17;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
+const APP_VERSION = 18;   // shown under ⋯ so it is clear which phone code is running; bump with ?v= and sw.js
 
 // ---------------------------------------------------------------- tiny IndexedDB key/value store
 const idb = (() => {
@@ -44,6 +44,16 @@ function show(id) {
   for (const s of GATES) $(s).hidden = s !== id;
   const app = id === "app";
   $("views").hidden = !app; $("tabbar").hidden = !app; $("menu-btn").hidden = !app;
+  updateBanner();
+}
+// PLAN-55: what waits on the phone is always visible. Saving never opens Google; sending needs a token, and a token
+// comes only from a tap (Send, Get latest, Sign in).
+let netDown = false;       // the last attempt to reach Drive failed for want of a connection
+function setPending(n) { pending = n; ui.refreshBadges(); updateBanner(); }
+function updateBanner() {
+  const b = $("sync-banner");
+  b.hidden = !(pending > 0 && !$("views").hidden);
+  if (!b.hidden) $("sync-text").textContent = `${pending} waiting · ${!token ? "Not signed in" : netDown ? "Offline" : "Not sent yet"}`;
 }
 function message(text) { $("msg").textContent = text; show("screen-msg"); }
 function toast(text, action) {
@@ -59,11 +69,11 @@ function ago(iso) {
 
 // ---------------------------------------------------------------- Google sign-in + Drive
 let tokenWait = null;      // the sign-in in progress, so two taps never start two Google windows
-function getToken(interactive) {
+function getToken(interactive, patient) {      // patient: started by a tap, so no 30 s limit while the person picks an account
   if (tokenWait) return tokenWait;
   tokenWait = new Promise((resolve, reject) => {
     if (!(window.google && google.accounts && google.accounts.oauth2)) return reject(new Error("Google sign-in did not load — check the connection."));
-    const slow = interactive ? null : setTimeout(() => reject(new Error("Google sign-in did not answer")), 30000);
+    const slow = interactive || patient ? null : setTimeout(() => reject(new Error("Google sign-in did not answer")), 30000);
     const done = () => clearTimeout(slow);
     if (!tokenClient) tokenClient = google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPES, callback: () => {} });
     tokenClient.callback = r => {
@@ -81,10 +91,7 @@ function getToken(interactive) {
   }).finally(() => { tokenWait = null; });
   return tokenWait;
 }
-// The app opens from the copy saved on the phone, without a Google sign-in. Asking Google again with no prompt brings
-// a token back without a question when this account already allowed the page (a Google window may flash). It must
-// start inside the tap — phones block sign-in windows opened later — so callers call this before their first await.
-function quietToken() { return token ? Promise.resolve(token) : getToken(false).catch(() => null); }
+// The app opens from the copy saved on the phone and does not ask Google for anything (PLAN-55).
 async function drive(url, opts = {}) {
   const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
   if (r.status === 401) { token = null; throw new Error("Google sign-in expired — tap Get latest again."); }
@@ -179,29 +186,37 @@ const ctx = {
     toast("Filed.", { label: "Undo", run: () => { undone = true; clearTimeout(timer); delete local.answers[desc]; rerender(); } });
   },
   upload: uploadFile,
-  // PLAN-48: entries made here wait on the phone until they reach Drive; this sends them now.
-  async flushNow() {
-    try { if (!token) await getToken(false); await flush(); pending = ((await idb.get("queue")) || []).length; ui.refreshBadges();
-      toast(pending ? `${pending} still waiting — try again with a connection.` : "Sent — the PC applies it within a minute while it runs."); }
-    catch (e) { toast("Not sent yet: " + e.message); }
-  },
+  flushNow: sendNow,
 };
+// Entries wait on the phone until they reach Drive; this is the one button that sends them (it signs in if it must).
+async function sendNow() {
+  try {
+    if (!token) await getToken(false, true);
+    await flush();
+    toast(pending ? `${pending} still waiting — try again with a connection.` : "Sent — the PC applies it within a minute while it runs.");
+  } catch (e) { toast("Not sent yet: " + (e instanceof TypeError ? "there is no connection." : e.message)); }
+  updateBanner();
+}
+$("sync-send").onclick = sendNow;
+// Back in the app, or the connection returns: if a token already exists, send what waits (never starts a sign-in).
+function tryQuietSend() { if (token && liveKey && pending) flush().catch(() => {}).finally(updateBanner); }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") tryQuietSend(); });
+window.addEventListener("online", tryQuietSend);
 
 // ---------------------------------------------------------------- the phone's queue (C2) and uploads (C3)
 // Each change goes to Drive as one encrypted file in a folder this page creates itself ("Finance-phone-queue");
 // the PC applies it with finance/sync/phone_queue.py and then republishes the snapshot.
 async function queueAdd(q, quiet) {
-  // quiet = a review answer sent 5 s after the tap: too late to open a sign-in window, so it only goes if signed in.
-  const signing = quiet ? null : quietToken();      // before the first await: still inside the tap
+  // quiet = a review answer sent 5 s after the tap: no toast. Saving never starts a sign-in (PLAN-55); it sends only
+  // when a token already exists, otherwise the entry waits on the phone and the banner offers Send.
   const items = (await idb.get("queue")) || [];
   items.push({ id: crypto.randomUUID(), at: new Date().toISOString(), path: String(q.path), fields: q.fields || [] });
   await idb.set("queue", items);
-  pending = items.length; ui.refreshBadges();
-  if (signing) await signing;
+  setPending(items.length);
   try { await flush(); if (!quiet) toast("Sent — the PC applies it within a minute while it runs."); }
   catch (e) {
-    pending = ((await idb.get("queue").catch(() => null)) || []).length; ui.refreshBadges();
-    toast(`Saved on this phone — ${pending} change(s) waiting to send.`, { label: "Send now", run: () => ctx.flushNow() });
+    setPending(((await idb.get("queue").catch(() => null)) || []).length);
+    if (!quiet) toast(`Saved on this phone — ${pending} waiting. Tap Send in the bar above when you are online.`);
   }
 }
 async function queueFolder() {
@@ -228,19 +243,23 @@ function sealParams(kind) {
   const { header } = readHeader(blob);
   return { salt: header.salt, iterations: header.iter, kind, made: new Date().toISOString(), profile: PROFILE };
 }
-async function flush() {
+let flushing = null;       // one send at a time, so a tap and a return to the app never upload the same entries twice
+function flush() { return flushing || (flushing = doFlush().finally(() => { flushing = null; })); }
+async function doFlush() {
   const items = (await idb.get("queue")) || [];
   if (!items.length) return;
   if (!token || !liveKey) throw new Error("not signed in");
-  await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue")));
+  try { await putSealed(`queue-${Date.now()}.fin`, await seal(liveKey, { items }, sealParams("queue"))); }
+  catch (e) { netDown = e instanceof TypeError; updateBanner(); throw e; }
+  netDown = false;
   const sent = new Set(items.map(i => i.id));
   const left = ((await idb.get("queue")) || []).filter(i => !sent.has(i.id));
   await idb.set("queue", left);
-  pending = left.length; ui.refreshBadges();
+  setPending(left.length);
 }
 async function uploadFile(f, what) {
   if (f.size > 15 * 1024 * 1024) throw new Error("that file is over 15 MB");
-  if (!token) await getToken(false);
+  if (!token) await getToken(false, true);
   const b64 = await new Promise((res, rej) => { const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
   await putSealed(`upload-${Date.now()}.fin`, await seal(liveKey, { name: f.name, b64, what: what || "" }, sealParams("upload")));
@@ -272,11 +291,55 @@ $("menu-btn").onclick = () => ui.sheet("Household finance", (body, s) => {
   body.append(
     btn("↻ Get latest", `Copy from the PC written ${ago(payload.made)}${pending ? ` · ${pending} change(s) to send` : ""}`, () => fetchLatest(false)),
     btn("Sign in again", "Switch Google account or grant Drive permission again", () => { token = null; fetchLatest(true); }),
+    btn("Layout report", "Screen size, keyboard and tab bar measurements — no data in it", layoutSheet),
     btn("Lock", "Forget the passphrase on this phone until you type it again", lock));
   const p = document.createElement("p"); p.className = "small muted";
   p.textContent = `Phone app v${APP_VERSION}${PROFILE === "test" ? " · beta · test profile (fake data)" : ""}. ` + "Changes made on the phone (review answers, routine ticks, files) wait encrypted in your Drive until the PC applies them. Everything else is set on the PC.";
   body.append(p);
 });
+
+// ---------------------------------------------------------------- layout readout (PLAN-54, BUG-001)
+// The bottom tab bar once disappeared on the real phone while typing. Layout numbers (no data) and the last 20 viewport
+// / focus events, so the cause can be read off the device instead of guessed.
+const layoutLog = [];
+function logLayout(type) {
+  const vv = window.visualViewport, bar = $("tabbar").getBoundingClientRect();
+  layoutLog.push({ at: new Date(), type, h: innerHeight, vh: vv ? Math.round(vv.height) : null, vtop: vv ? Math.round(vv.offsetTop) : null, tab: Math.round(bar.top) });
+  if (layoutLog.length > 20) layoutLog.shift();
+}
+for (const t of ["resize", "orientationchange"]) window.addEventListener(t, () => logLayout(t));
+if (window.visualViewport) for (const t of ["resize", "scroll"]) visualViewport.addEventListener(t, () => logLayout("viewport " + t));
+for (const t of ["focusin", "focusout"]) document.addEventListener(t, () => logLayout(t));
+function measure(css) {
+  const d = document.createElement("div"); d.style.cssText = "position:fixed;visibility:hidden;" + css; document.body.append(d);
+  const cs = getComputedStyle(d), r = d.getBoundingClientRect(), out = { h: r.height, pt: cs.paddingTop, pr: cs.paddingRight, pb: cs.paddingBottom, pl: cs.paddingLeft };
+  d.remove(); return out;
+}
+function layoutReport() {
+  const vv = window.visualViewport, bar = $("tabbar").getBoundingClientRect();
+  const mode = ["standalone", "fullscreen", "minimal-ui"].find(m => matchMedia(`(display-mode: ${m})`).matches) || "browser tab";
+  const safe = measure("padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)");
+  const lines = [
+    `display mode: ${mode}`,
+    `window: ${innerWidth} x ${innerHeight}`,
+    `visual viewport: ${vv ? `${Math.round(vv.width)} x ${Math.round(vv.height)}, top ${Math.round(vv.offsetTop)}, left ${Math.round(vv.offsetLeft)}, scale ${vv.scale}` : "not available"}`,
+    `100dvh: ${Math.round(measure("height:100dvh").h)}`,
+    `safe area (top right bottom left): ${[safe.pt, safe.pr, safe.pb, safe.pl].map(v => Math.round(parseFloat(v) || 0)).join(" ")}`,
+    `tab bar: top ${Math.round(bar.top)}, height ${Math.round(bar.height)}`,
+    `browser: ${navigator.userAgent}`,
+    `recent events (newest last, at most 20):`,
+    ...layoutLog.map(e => `  ${e.at.toTimeString().slice(0, 8)} ${e.type}: window ${e.h}, viewport ${e.vh} (top ${e.vtop}), tab bar top ${e.tab}`),
+  ];
+  return lines.join("\n");
+}
+function layoutSheet() {
+  ui.sheet("Layout report", body => {
+    const pre = document.createElement("pre");
+    pre.style.cssText = "white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0";
+    pre.textContent = layoutReport();
+    body.append(pre);
+  });
+}
 
 // ---------------------------------------------------------------- start
 (async () => {

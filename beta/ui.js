@@ -1,6 +1,6 @@
 // The phone app's own screens (PLAN-44). Drawn from payload.phone (finance/sync/phone_data.py), never from PC pages.
 // Rule: every tab fits on one screen; anything longer opens in a bottom sheet.
-import * as calc from "./calc.js?v=17";
+import * as calc from "./calc.js?v=18";
 let D = null, C = null;               // data, context from app.js
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -218,7 +218,7 @@ function sendForm(key, path, fieldsFn, button = "Save") {
     btn.disabled = true;
     try { await C.send(path, fields); sentHere.add(key);
       const w = C.pendingCount ? C.pendingCount() : 0;
-      msg.innerHTML = w ? '<span class="sent-ok">Saved on this phone — it goes to the PC when there is a connection (To do → Today shows it).</span>'
+      msg.innerHTML = w ? '<span class="sent-ok">Saved on this phone — tap Send in the bar above when you are online (To do → Today shows it).</span>'
         : '<span class="sent-ok">Sent — the PC applies it within a minute while it runs, then writes a new copy.</span>';
       btn.textContent = "Sent ✓ — send again"; }
     catch (err) { msg.textContent = "Could not save: " + err.message; }
